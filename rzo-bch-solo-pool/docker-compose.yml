@@ -1,0 +1,138 @@
+version: "3.7"
+
+services:
+
+  app_proxy:
+    environment:
+      APP_HOST: rzo-bch-webui
+      APP_PORT: 2030
+      PROXY_AUTH_WHITELIST: "/api/*"
+
+  pool:
+    image: debian:13-slim
+    container_name: rzo-bch-pool
+    restart: always
+    user: "1000:1000"
+
+    volumes:
+      - /home/umbrel/para-bch-work/target/release/para:/usr/local/bin/para:ro
+      - /home/umbrel/para-data-bch:/data
+
+    environment:
+      BCH_RPC_USER: ${APP_BITCOIN_CASH_NODE_RPC_USER}
+      BCH_RPC_PASS: ${APP_BITCOIN_CASH_NODE_RPC_PASS}
+      BCH_NODE_IP: ${APP_BITCOIN_CASH_NODE_NODE_IP}
+      BCH_RPC_PORT: ${APP_BITCOIN_CASH_NODE_RPC_PORT}
+      BCH_ZMQ_PORT: ${APP_BITCOIN_CASH_NODE_ZMQ_HASHBLOCK_PORT}
+
+    entrypoint:
+      - /bin/bash
+      - -lc
+      - |
+        echo "Warte auf BCHN RPC..."
+
+        until (echo >/dev/tcp/$${BCH_NODE_IP}/$${BCH_RPC_PORT}) >/dev/null 2>&1; do
+          sleep 2
+        done
+
+        echo "BCHN RPC erreichbar - warte 10 Sekunden auf Initialisierung..."
+        sleep 10
+
+        echo "BCHN bereit - starte RZO BCH Pool"
+
+        exec /usr/local/bin/para pool \
+          --address 0.0.0.0 \
+          --port 43069 \
+          --high-diff-port 43068 \
+          --http-port 43070 \
+          --chain mainnet \
+          --bitcoin-rpc-host "$${BCH_NODE_IP}" \
+          --bitcoin-rpc-port "$${BCH_RPC_PORT}" \
+          --bitcoin-rpc-username "$${BCH_RPC_USER}" \
+          --bitcoin-rpc-password "$${BCH_RPC_PASS}" \
+          --start-diff 1000 \
+          --min-diff 512 \
+          --vardiff-period 3.33 \
+          --vardiff-window 300 \
+          --update-interval 20 \
+          --zmq-block-notifications "tcp://$${BCH_NODE_IP}:$${BCH_ZMQ_PORT}" \
+          --enonce1-size 4 \
+          --enonce2-size 8 \
+          --bitcoind-timeout 60 \
+          --data-dir /data \
+          --store-path /data/para.redb \
+          --events-file /data/events.json
+
+    ports:
+      - "43068:43068"
+      - "43069:43069"
+      - "43070:43070"
+
+    networks:
+      - umbrel_main_network
+
+
+  webui:
+    image: python:3.13-slim
+    container_name: rzo-bch-webui
+    restart: always
+    user: "1000:1000"
+    working_dir: /app
+
+    environment:
+      PYTHONDONTWRITEBYTECODE: "1"
+      BACKEND_BASE: http://rzo-bch-pool:43070
+      STRATUM_HOST: rzo-bch-pool
+      STRATUM_PORT: "43069"
+      BITCOIN_HOST: ${APP_BITCOIN_CASH_NODE_NODE_IP}
+      BITCOIN_RPC_PORT: ${APP_BITCOIN_CASH_NODE_RPC_PORT}
+
+    volumes:
+      - /home/umbrel/para-bch-ui:/app:ro
+      - /home/umbrel/rzo-webui-data:/home/umbrel/rzo-webui-data
+      - /home/umbrel/para-data-bch:/home/umbrel/para-data-bch:ro
+
+    command:
+      - python3
+      - -u
+      - /app/server.py
+
+    ports:
+      - "2030:2030"
+
+    networks:
+      - umbrel_main_network
+
+    depends_on:
+      - pool
+
+
+  widget-server:
+    image: python:3.13-slim
+    restart: always
+    user: "1000:1000"
+    working_dir: /widget
+
+    environment:
+      PYTHONDONTWRITEBYTECODE: "1"
+      RZO_WEBUI_BASE: http://rzo-bch-webui:2030
+
+    volumes:
+      - ./widget:/widget:ro
+
+    command:
+      - python3
+      - -u
+      - /widget/server.py
+
+    networks:
+      - umbrel_main_network
+
+    depends_on:
+      - webui
+
+
+networks:
+  umbrel_main_network:
+    external: true
+    name: umbrel_main_network

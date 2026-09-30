@@ -1,0 +1,46 @@
+manifestVersion: 1.1
+
+id: rzo-bch-solo-pool
+category: bitcoin
+name: RZO Bitcoin Cash Solo Pool
+version: "1.0.0"
+tagline: RZO Bitcoin Cash Solo Mining Pool
+description: >-
+  RZO Bitcoin Cash Solo Pool with Para backend,
+  RZO WebUI and live Umbrel home-screen statistics.
+
+developer: RechenZauberOnline
+website: ""
+dependencies:
+  - bitcoin-cash-node
+repo: ""
+support: ""
+
+port: 2030
+gallery: []
+path: ""
+defaultUsername: ""
+defaultPassword: ""
+
+widgets:
+  - id: "pool-stats"
+    type: "four-stats"
+    refresh: "5s"
+    endpoint: "widget-server:3000/api/widget/stats"
+    link: ""
+    example:
+      type: "four-stats"
+      link: ""
+      items:
+        - title: "Hashrate"
+          text: "37.9"
+          subtext: "TH/s"
+        - title: "Users"
+          text: "2"
+          subtext: "active"
+        - title: "Workers"
+          text: "7"
+          subtext: "active"
+        - title: "Blocks"
+          text: "0"
+          subtext: "found"
