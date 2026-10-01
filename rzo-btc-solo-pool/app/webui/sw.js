@@ -1,0 +1,3 @@
+const CACHE="rzo-v3.0.0-static";const ASSETS=["/","/miner.html","/css/custom.css?v=3.0.0","/js/v2.js?v=3.0.0","/img/rzo.svg"];self.addEventListener("install",e=>{self.skipWaiting();e.waitUntil(caches.open(CACHE).then(c=>c.addAll(ASSETS)))});self.addEventListener("activate",e=>e.waitUntil(Promise.all([self.clients.claim(),caches.keys().then(k=>Promise.all(k.filter(x=>x!==CACHE).map(x=>caches.delete(x))))])));self.addEventListener("fetch",e=>{if(e.request.url.includes("/api/"))return;e.respondWith(fetch(e.request).then(r=>{const x=r.clone();caches.open(CACHE).then(c=>c.put(e.request,x));return r}).catch(()=>caches.match(e.request)))})
+
+// RZO WebUI v3.1.0 cache refresh 20260727-071119

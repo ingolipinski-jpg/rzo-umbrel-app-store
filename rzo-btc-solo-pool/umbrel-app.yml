@@ -1,0 +1,49 @@
+manifestVersion: 1.1
+
+id: rzo-btc-solo-pool
+category: bitcoin
+name: RZO Bitcoin Solo Pool
+version: "1.0.0"
+tagline: RZO Bitcoin Solo Mining Pool
+description: >-
+  RZO Bitcoin Solo Pool with Para backend,
+  RZO WebUI and live Umbrel home-screen statistics.
+
+developer: RechenZauberOnline
+website: "https://github.com/ingolipinski-jpg/rzo-umbrel-app-store"
+
+dependencies:
+  - bitcoin
+
+repo: "https://github.com/ingolipinski-jpg/rzo-umbrel-app-store"
+support: "https://github.com/ingolipinski-jpg/rzo-umbrel-app-store"
+
+port: 2020
+
+gallery: []
+path: ""
+defaultUsername: ""
+defaultPassword: ""
+
+widgets:
+  - id: "pool-stats"
+    type: "four-stats"
+    refresh: "5s"
+    endpoint: "widget-server:3000/api/widget/stats"
+    link: ""
+    example:
+      type: "four-stats"
+      link: ""
+      items:
+        - title: "Hashrate"
+          text: "132.9"
+          subtext: "TH/s"
+        - title: "Users"
+          text: "4"
+          subtext: "active"
+        - title: "Workers"
+          text: "10"
+          subtext: "active"
+        - title: "Blocks"
+          text: "0"
+          subtext: "found"

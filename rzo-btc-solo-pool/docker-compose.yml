@@ -1,0 +1,141 @@
+version: "3.7"
+
+services:
+
+  app_proxy:
+    environment:
+      APP_HOST: rpc-forwarder
+      APP_PORT: 2020
+
+  rpc-forwarder:
+    image: alpine/socat:1.8.0.0
+    restart: always
+
+    command:
+      - -dd
+      - TCP-LISTEN:8332,bind=127.0.0.1,reuseaddr,fork
+      - TCP:${APP_BITCOIN_NODE_IP}:${APP_BITCOIN_RPC_PORT}
+
+    ports:
+      - "42068:42068"
+      - "42069:42069"
+      - "42070:42070"
+      - "2020:2020"
+
+    networks:
+      - umbrel_main_network
+
+  pool:
+    image: debian:13-slim
+    restart: always
+    user: "0:0"
+
+    network_mode: "service:rpc-forwarder"
+
+    volumes:
+      - ./app/para/para:/usr/local/bin/para:ro
+      - ${APP_DATA_DIR}/data/para:/data
+
+    environment:
+      BTC_RPC_USER: ${APP_BITCOIN_RPC_USER}
+      BTC_RPC_PASS: ${APP_BITCOIN_RPC_PASS}
+      BTC_NODE_IP: ${APP_BITCOIN_NODE_IP}
+      BTC_RPC_PORT: ${APP_BITCOIN_RPC_PORT}
+      BTC_ZMQ_PORT: ${APP_BITCOIN_ZMQ_HASHBLOCK_PORT}
+
+    entrypoint:
+      - /bin/bash
+      - -lc
+      - |
+        echo "Warte auf Bitcoin Node RPC..."
+
+        until (echo >/dev/tcp/$${BTC_NODE_IP}/$${BTC_RPC_PORT}) >/dev/null 2>&1; do
+          sleep 2
+        done
+
+        echo "Bitcoin RPC erreichbar - warte auf lokalen RPC-Forwarder..."
+
+        until (echo >/dev/tcp/127.0.0.1/8332) >/dev/null 2>&1; do
+          sleep 1
+        done
+
+        echo "RPC-Forwarder erreichbar - starte RZO BTC Solo Pool"
+
+        exec /usr/local/bin/para pool \
+          --address 0.0.0.0 \
+          --port 42069 \
+          --high-diff-port 42068 \
+          --http-port 42070 \
+          --chain mainnet \
+          --bitcoin-rpc-port 8332 \
+          --bitcoin-rpc-username "$${BTC_RPC_USER}" \
+          --bitcoin-rpc-password "$${BTC_RPC_PASS}" \
+          --start-diff 1000 \
+          --min-diff 512 \
+          --vardiff-period 3.33 \
+          --vardiff-window 300 \
+          --update-interval 20 \
+          --zmq-block-notifications "tcp://$${BTC_NODE_IP}:$${BTC_ZMQ_PORT}" \
+          --enonce1-size 4 \
+          --enonce2-size 8 \
+          --bitcoind-timeout 60 \
+          --data-dir /data \
+          --store-path /data/para.redb \
+          --events-file /data/events.json
+
+    depends_on:
+      - rpc-forwarder
+
+  webui:
+    image: python:3.13-slim
+    restart: always
+    user: "1000:1000"
+    working_dir: /app
+
+    network_mode: "service:rpc-forwarder"
+
+    environment:
+      PYTHONDONTWRITEBYTECODE: "1"
+
+    volumes:
+      - ./app/webui:/app:ro
+      - ${APP_DATA_DIR}/data/webui:/home/umbrel/rzo-webui-data
+      - ${APP_DATA_DIR}/data/para:/home/umbrel/para-data:ro
+
+    command:
+      - python3
+      - -u
+      - /app/server.py
+
+    depends_on:
+      - rpc-forwarder
+      - pool
+
+  widget-server:
+    image: python:3.13-slim
+    restart: always
+    user: "1000:1000"
+    working_dir: /widget
+
+    environment:
+      PYTHONDONTWRITEBYTECODE: "1"
+      RZO_WEBUI_BASE: http://rpc-forwarder:2020
+
+    volumes:
+      - ./widget:/widget:ro
+
+    command:
+      - python3
+      - -u
+      - /widget/server.py
+
+    networks:
+      - umbrel_main_network
+
+    depends_on:
+      - webui
+
+networks:
+  umbrel_main_network:
+    external: true
+    name: umbrel_main_network

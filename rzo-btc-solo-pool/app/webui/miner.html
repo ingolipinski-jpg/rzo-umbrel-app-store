@@ -1,0 +1,523 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>Meine Miner · RZO</title>
+  <meta
+    name="description"
+    content="Persönliches RZO Solo-Mining-Dashboard"
+  >
+
+  <link rel="icon" href="/img/rzo.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/css/modern-normalize.css">
+  <link rel="stylesheet" href="/css/custom.css?v=stratum-layout-2">
+
+  <script>
+  (()=>{
+    const marker="rzo-cache-reset-2.2.1";
+    if(localStorage.getItem(marker)) return;
+    localStorage.setItem(marker,"1");
+    if("caches" in window) caches.keys().then(keys=>Promise.all(keys.map(k=>caches.delete(k))));
+    if("serviceWorker" in navigator) navigator.serviceWorker.getRegistrations().then(rs=>Promise.all(rs.map(r=>r.unregister())));
+  })();
+  </script>
+</head>
+
+<body class="rzo-body">
+  <header class="rzo-header">
+    <div class="rzo-header-inner">
+      <a class="rzo-brand" href="/">
+        <span class="rzo-logo">RZO</span>
+
+        <span class="rzo-brand-text">
+          <strong>RechenZauberOnline</strong>
+          <small>Bitcoin Solo Pool</small>
+        </span>
+      </a>
+
+      <a class="rzo-nav-link" href="/">Pool-Dashboard</a>
+    </div>
+  </header>
+
+  <main class="rzo-main">
+    <section class="rzo-hero rzo-hero-small">
+      <div>
+        <span class="rzo-kicker">Persönliches Dashboard</span>
+        <h1>Meine Miner</h1>
+
+        <p>
+          Angezeigt werden ausschließlich die Daten der eingegebenen
+          Bitcoin-Adresse.
+        </p>
+      </div>
+
+      <div class="rzo-live">
+        <span id="live-dot" class="rzo-live-dot"></span>
+
+        <div>
+          <strong id="connection-status">Daten werden geladen</strong>
+          <small id="updated-at">–</small>
+        </div>
+      </div>
+    </section>
+
+    <section class="rzo-address-panel">
+      <label for="address-input">Bitcoin-Adresse</label>
+
+      <div class="rzo-search-row">
+        <input
+          id="address-input"
+          type="text"
+          inputmode="text"
+          autocomplete="off"
+          spellcheck="false"
+          placeholder="bc1q…"
+        >
+
+        <button id="address-button" type="button">
+          Miner anzeigen
+        </button>
+      </div>
+
+      <p
+        id="address-message"
+        class="rzo-message"
+        aria-live="polite"
+      ></p>
+    </section>
+
+    <section id="miner-dashboard" hidden>
+      <div class="rzo-address-display rzo-address-actions">
+        <div>
+          <span>Mining-Adresse</span>
+          <strong id="address-display">–</strong>
+        </div>
+
+        <button
+          id="copy-address-button"
+          class="rzo-secondary-button"
+          type="button"
+        >
+          Adresse kopieren
+        </button>
+      </div>
+
+      <section class="rzo-network-strip">
+        <article>
+          <span>Bitcoin-Block</span>
+          <strong id="bitcoin-height">–</strong>
+          <small>Aktuelle Blockhöhe</small>
+        </article>
+
+        <article>
+          <span>Netzwerk-Difficulty</span>
+          <strong id="network-difficulty">–</strong>
+          <small>Blockziel des Bitcoin-Netzwerks</small>
+        </article>
+
+        <article>
+          <span>Netzwerk-Hashrate</span>
+          <strong id="network-hashrate">–</strong>
+          <small>Geschätzte Gesamtrechenleistung</small>
+        </article>
+
+        <article>
+          <span>Mempool</span>
+          <strong id="mempool-transactions">–</strong>
+          <small>Unbestätigte Transaktionen</small>
+        </article>
+      </section>
+
+      <div class="rzo-metric-grid">
+        <article class="rzo-metric rzo-metric-primary">
+          <span>Aktuelle Hashrate</span>
+          <strong id="user-hashrate">–</strong>
+          <small>5-Minuten-Durchschnitt aller Worker</small>
+
+          <div class="rzo-user-sparkline">
+            <svg
+              id="user-sparkline"
+              viewBox="0 0 400 80"
+              preserveAspectRatio="none"
+              aria-label="Lokaler Hashrate-Verlauf"
+            >
+              <polyline id="user-sparkline-line" points=""></polyline>
+            </svg>
+
+            <small id="hashrate-trend">Verlauf wird aufgebaut</small>
+          </div>
+        </article>
+
+        <article class="rzo-metric">
+          <span>Worker</span>
+          <strong id="user-workers">–</strong>
+          <small id="worker-status-summary">Erkannte Miner</small>
+        </article>
+
+        <article class="rzo-metric">
+          <span>Sessions</span>
+          <strong id="user-sessions">–</strong>
+          <small>Aktive Stratum-Verbindungen</small>
+        </article>
+
+        <article class="rzo-metric">
+          <span>Best Diff</span>
+          <strong id="user-best-share" class="rzo-best-diff">–</strong>
+          <small id="best-diff-percentage">
+            Vergleich zur Netzwerk-Difficulty
+          </small>
+
+          <div class="rzo-progress">
+            <span id="best-diff-progress"></span>
+          </div>
+        </article>
+
+        <article class="rzo-metric">
+          <span>Letzter Share</span>
+          <strong id="user-last-share">–</strong>
+          <small id="user-last-share-date">–</small>
+        </article>
+
+        <article class="rzo-metric">
+          <span>Kumulierte Rechenarbeit</span>
+          <strong id="user-hash-days">–</strong>
+          <small>Seit Beginn der Erfassung</small>
+        </article>
+
+        <article class="rzo-metric">
+          <span>Accepted Shares</span>
+          <strong id="user-accepted-shares">–</strong>
+          <small>Vom Pool angenommene Shares</small>
+        </article>
+
+        <article class="rzo-metric">
+          <span>Rejected Shares</span>
+          <strong id="user-rejected-shares">–</strong>
+          <small id="user-reject-rate">Reject-Quote: –</small>
+        </article>
+
+        <article class="rzo-metric">
+          <span>Ø Hashrate je Worker</span>
+          <strong id="average-worker-hashrate">–</strong>
+          <small>5-Minuten-Gesamthashrate geteilt durch Worker</small>
+        </article>
+      </div>
+
+      <section class="rzo-section">
+        <div class="rzo-section-heading">
+          <div>
+            <span class="rzo-kicker">Worker-Übersicht</span>
+            <h2>Miner dieser Adresse</h2>
+          </div>
+
+          <span id="worker-summary" class="rzo-pill">0 Worker</span>
+        </div>
+
+        <div class="rzo-worker-toolbar">
+          <input
+            id="worker-search"
+            type="search"
+            autocomplete="off"
+            placeholder="Worker suchen …"
+          >
+
+          <div
+            id="worker-filters"
+            class="rzo-filter-group"
+            aria-label="Worker filtern"
+          >
+            <button
+              type="button"
+              class="is-active"
+              data-worker-filter="all"
+            >
+              Alle
+            </button>
+
+            <button type="button" data-worker-filter="online">
+              Online
+            </button>
+
+            <button type="button" data-worker-filter="idle">
+              Idle
+            </button>
+
+            <button type="button" data-worker-filter="offline">
+              Offline
+            </button>
+          </div>
+        </div>
+
+        <div id="worker-list" class="rzo-worker-list"></div>
+
+        <div id="worker-no-results" class="rzo-empty" hidden>
+          <strong>Keine passenden Worker</strong>
+
+          <p>
+            Passe den Suchbegriff oder den Statusfilter an.
+          </p>
+        </div>
+
+        <div id="worker-fallback" class="rzo-empty" hidden>
+          <strong>Worker-Gesamtdaten verfügbar</strong>
+
+          <p>
+            Für diese Adresse wurden Gesamtwerte gefunden, aber keine
+            einzelnen Worker übermittelt.
+          </p>
+        </div>
+      </section>
+
+      <section class="rzo-section">
+        <div class="rzo-section-heading">
+          <div>
+            <span class="rzo-kicker">Pool & System</span>
+            <h2>Technischer Status</h2>
+          </div>
+
+          <span id="pool-block-count" class="rzo-pill">0 Blöcke</span>
+        </div>
+
+        <div class="rzo-status-grid">
+          <article>
+            <span>Pool-Uptime</span>
+            <strong id="pool-uptime">–</strong>
+          </article>
+
+          <article>
+            <span>System-Uptime</span>
+            <strong id="system-uptime">–</strong>
+          </article>
+
+          <article>
+            <span>CPU</span>
+            <strong id="system-cpu">–</strong>
+          </article>
+
+          <article>
+            <span>RAM</span>
+            <strong id="system-memory">–</strong>
+          </article>
+
+          <article>
+            <span>Datenträger</span>
+            <strong id="system-disk">–</strong>
+          </article>
+
+          <article>
+            <span>Pool-Best-Diff</span>
+            <strong id="pool-best-diff">–</strong>
+          </article>
+        </div>
+      </section>
+
+      <section class="rzo-section">
+        <div class="rzo-section-heading">
+          <div>
+            <span class="rzo-kicker">Blockhistorie</span>
+            <h2>Gefundene Blöcke</h2>
+          </div>
+        </div>
+
+        <div id="block-history-empty" class="rzo-empty">
+          <strong>Noch kein Block gefunden</strong>
+
+          <p>
+            Sobald RZO einen gültigen Bitcoin-Block findet, erscheint er
+            hier. Es werden keine erfundenen Luck- oder Blockwerte angezeigt.
+          </p>
+        </div>
+      </section>
+    </section>
+  
+<section class="rzo-connect-section" id="miner-verbinden">
+  <div class="rzo-section-heading">
+    <div>
+      <span class="rzo-kicker">Stratum V1</span>
+      <h2>Miner mit RZO verbinden</h2>
+    </div>
+
+    <span class="rzo-pill rzo-connect-online">
+      Öffentlich erreichbar
+    </span>
+  </div>
+
+  <!-- NORMAL STRATUM -->
+  <div class="rzo-connect-card">
+    <div class="rzo-connect-main">
+      <span class="rzo-connect-label">Standard-Stratum</span>
+
+      <strong class="rzo-connect-url">
+        stratum+tcp://rechenzauberonline.duckdns.org:2018
+      </strong>
+
+      <button
+        type="button"
+        class="rzo-copy-button"
+        data-copy-value="stratum+tcp://rechenzauberonline.duckdns.org:2018"
+      >
+        Stratum-Adresse kopieren
+      </button>
+    </div>
+
+    <div class="rzo-connect-grid">
+
+      <div>
+        <span class="rzo-connect-label">Host</span>
+        <strong>rechenzauberonline.duckdns.org</strong>
+
+        <button
+          type="button"
+          class="rzo-copy-button"
+          data-copy-value="rechenzauberonline.duckdns.org"
+        >
+          Kopieren
+        </button>
+      </div>
+
+      <div>
+        <span class="rzo-connect-label">Port</span>
+        <strong>2018</strong>
+
+        <button
+          type="button"
+          class="rzo-copy-button"
+          data-copy-value="2018"
+        >
+          Kopieren
+        </button>
+      </div>
+
+      <div>
+        <span class="rzo-connect-label">Start-Difficulty</span>
+        <strong>1.000</strong>
+        <small>Für normale Miner</small>
+      </div>
+
+      <div>
+        <span class="rzo-connect-label">Benutzername</span>
+        <strong>BTC-Adresse.Workername</strong>
+        <small>Beispiel: bc1q…xyz.RZOAvalonQ</small>
+      </div>
+
+      <div>
+        <span class="rzo-connect-label">Passwort</span>
+        <strong>x</strong>
+
+        <button
+          type="button"
+          class="rzo-copy-button"
+          data-copy-value="x"
+        >
+          Kopieren
+        </button>
+      </div>
+
+    </div>
+  </div>
+
+
+  <!-- HIGH-DIFF STRATUM -->
+  <div class="rzo-connect-card" style="margin-top: 18px;">
+    <div class="rzo-connect-main">
+      <span class="rzo-connect-label">High-Diff-Stratum</span>
+
+      <strong class="rzo-connect-url">
+        stratum+tcp://rechenzauberonline.duckdns.org:2028
+      </strong>
+
+      <button
+        type="button"
+        class="rzo-copy-button"
+        data-copy-value="stratum+tcp://rechenzauberonline.duckdns.org:2028"
+      >
+        High-Diff-Adresse kopieren
+      </button>
+    </div>
+
+    <div class="rzo-connect-grid">
+
+      <div>
+        <span class="rzo-connect-label">Host</span>
+        <strong>rechenzauberonline.duckdns.org</strong>
+
+        <button
+          type="button"
+          class="rzo-copy-button"
+          data-copy-value="rechenzauberonline.duckdns.org"
+        >
+          Kopieren
+        </button>
+      </div>
+
+      <div>
+        <span class="rzo-connect-label">Port</span>
+        <strong>2028</strong>
+
+        <button
+          type="button"
+          class="rzo-copy-button"
+          data-copy-value="2028"
+        >
+          Kopieren
+        </button>
+      </div>
+
+      <div>
+        <span class="rzo-connect-label">Start-Difficulty</span>
+        <strong>1.000.000</strong>
+        <small>High-Diff-Port</small>
+      </div>
+
+      <div>
+        <span class="rzo-connect-label">Benutzername</span>
+        <strong>BTC-Adresse.Workername</strong>
+        <small>Beispiel: bc1q…xyz.RZOAvalonQ</small>
+      </div>
+
+      <div>
+        <span class="rzo-connect-label">Passwort</span>
+        <strong>x</strong>
+
+        <button
+          type="button"
+          class="rzo-copy-button"
+          data-copy-value="x"
+        >
+          Kopieren
+        </button>
+      </div>
+
+    </div>
+  </div>
+
+
+  <div class="rzo-connect-note">
+    <strong>Welchen Port soll ich verwenden?</strong><br>
+    Port <strong>2018</strong> ist der normale RZO-Stratum-Zugang mit
+    Start-Difficulty <strong>1.000</strong>.<br>
+    Port <strong>2028</strong> ist der High-Diff-Zugang mit
+    Start-Difficulty <strong>1.000.000</strong>.
+
+    <br><br>
+
+    <strong>Wichtig:</strong>
+    Im Miner nicht <code>http://</code> verwenden.
+    Als Pool-Protokoll Stratum beziehungsweise
+    <code>stratum+tcp</code> auswählen.
+  </div>
+</section>
+
+</main>
+
+  <footer class="rzo-footer">
+    RZO WebUI v3.2.0 · RechenZauberOnline · lokale Bitcoin-Solo-Pool-WebUI
+  </footer>
+
+  <script src="/js/miner.js" defer></script>
+  <script src="/js/connection.js" defer></script>
+  <script src="/js/v2.js?v=3.0.0" defer></script>
+</body>
+</html>
