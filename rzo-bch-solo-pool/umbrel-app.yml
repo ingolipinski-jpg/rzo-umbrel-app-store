@@ -3,6 +3,7 @@ manifestVersion: 1.1
 id: rzo-bch-solo-pool
 category: bitcoin
 name: RZO Bitcoin Cash Solo Pool
+icon: "https://raw.githubusercontent.com/ingolipinski-jpg/rzo-umbrel-app-store/main/rzo-bch-solo-pool/icon.png"
 version: "1.0.0"
 tagline: RZO Bitcoin Cash Solo Mining Pool
 description: >-
