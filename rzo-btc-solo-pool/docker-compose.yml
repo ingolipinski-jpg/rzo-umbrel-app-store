@@ -4,7 +4,7 @@ services:
 
   app_proxy:
     environment:
-      APP_HOST: webui
+      APP_HOST: rpc-forwarder
       APP_PORT: 2020
 
   rpc-forwarder:
@@ -20,7 +20,6 @@ services:
       - "42068:42068"
       - "42069:42069"
       - "42070:42070"
-      - "2020:2020"
 
     networks:
       - umbrel_main_network
@@ -69,7 +68,7 @@ services:
   webui:
     image: python:3.13-slim
     restart: always
-    user: "1000:1000"
+    user: "0:0"
     working_dir: /app
 
     network_mode: "service:rpc-forwarder"
@@ -85,7 +84,21 @@ services:
     command:
       - python3
       - -u
-      - /app/server.py
+      - -c
+      - |
+        import os, runpy
+        data = "/home/umbrel/rzo-webui-data"
+        os.makedirs(data, exist_ok=True)
+        for root, dirs, files in os.walk(data):
+            os.chown(root, 1000, 1000)
+            for name in dirs:
+                os.chown(os.path.join(root, name), 1000, 1000)
+            for name in files:
+                os.chown(os.path.join(root, name), 1000, 1000)
+        os.setgroups([])
+        os.setgid(1000)
+        os.setuid(1000)
+        runpy.run_path("/app/server.py", run_name="__main__")
 
     depends_on:
       - rpc-forwarder
