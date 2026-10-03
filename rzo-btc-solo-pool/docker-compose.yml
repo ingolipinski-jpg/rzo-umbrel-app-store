@@ -65,6 +65,29 @@ services:
     depends_on:
       - rpc-forwarder
 
+  device-watcher:
+    image: python:3.13-slim
+    restart: always
+    user: "0:0"
+
+    network_mode: "service:rpc-forwarder"
+
+    cap_add:
+      - NET_RAW
+
+    volumes:
+      - ${APP_DATA_DIR}/app/device-watcher:/watcher:ro
+      - ${APP_DATA_DIR}/data/webui:/home/umbrel/rzo-webui-data
+
+    command:
+      - python3
+      - -u
+      - /watcher/watcher.py
+
+    depends_on:
+      - rpc-forwarder
+      - pool
+
   webui:
     image: python:3.13-slim
     restart: always
