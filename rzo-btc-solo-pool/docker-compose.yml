@@ -61,27 +61,7 @@ services:
 
         echo "RPC-Forwarder erreichbar - starte RZO BTC Solo Pool"
 
-        exec /usr/local/bin/para pool \
-          --address 0.0.0.0 \
-          --port 42069 \
-          --high-diff-port 42068 \
-          --http-port 42070 \
-          --chain mainnet \
-          --bitcoin-rpc-port 8332 \
-          --bitcoin-rpc-username "$${BTC_RPC_USER}" \
-          --bitcoin-rpc-password "$${BTC_RPC_PASS}" \
-          --start-diff 1000 \
-          --min-diff 512 \
-          --vardiff-period 3.33 \
-          --vardiff-window 300 \
-          --update-interval 20 \
-          --zmq-block-notifications "tcp://$${BTC_NODE_IP}:$${BTC_ZMQ_PORT}" \
-          --enonce1-size 4 \
-          --enonce2-size 8 \
-          --bitcoind-timeout 60 \
-          --data-dir /data \
-          --store-path /data/para.redb \
-          --events-file /data/events.json
+        exec /usr/local/bin/para pool --address 0.0.0.0 --port 42069 --high-diff-port 42068 --http-port 42070 --chain mainnet --bitcoin-rpc-port 8332 --bitcoin-rpc-username "$${BTC_RPC_USER}" --bitcoin-rpc-password "$${BTC_RPC_PASS}" --start-diff 1000 --min-diff 512 --vardiff-period 3.33 --vardiff-window 300 --update-interval 20 --zmq-block-notifications "tcp://$${BTC_NODE_IP}:$${BTC_ZMQ_PORT}" --enonce1-size 4 --enonce2-size 8 --bitcoind-timeout 60 --data-dir /data --store-path /data/para.redb --events-file /data/events.json
 
     depends_on:
       - rpc-forwarder
