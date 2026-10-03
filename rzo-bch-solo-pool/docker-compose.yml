@@ -28,40 +28,7 @@ services:
     entrypoint:
       - /bin/bash
       - -lc
-      - |
-        echo "Warte auf BCHN RPC..."
-
-        until (echo >/dev/tcp/$${BCH_NODE_IP}/$${BCH_RPC_PORT}) >/dev/null 2>&1; do
-          sleep 2
-        done
-
-        echo "BCHN RPC erreichbar - warte 10 Sekunden auf Initialisierung..."
-        sleep 10
-
-        echo "BCHN bereit - starte RZO BCH Pool"
-
-        exec /usr/local/bin/para pool \
-          --address 0.0.0.0 \
-          --port 43069 \
-          --high-diff-port 43068 \
-          --http-port 43070 \
-          --chain mainnet \
-          --bitcoin-rpc-host "$${BCH_NODE_IP}" \
-          --bitcoin-rpc-port "$${BCH_RPC_PORT}" \
-          --bitcoin-rpc-username "$${BCH_RPC_USER}" \
-          --bitcoin-rpc-password "$${BCH_RPC_PASS}" \
-          --start-diff 1000 \
-          --min-diff 512 \
-          --vardiff-period 3.33 \
-          --vardiff-window 300 \
-          --update-interval 20 \
-          --zmq-block-notifications "tcp://$${BCH_NODE_IP}:$${BCH_ZMQ_PORT}" \
-          --enonce1-size 4 \
-          --enonce2-size 8 \
-          --bitcoind-timeout 60 \
-          --data-dir /data \
-          --store-path /data/para.redb \
-          --events-file /data/events.json
+      - 'echo "Warte auf BCHN RPC..."; until (echo >/dev/tcp/$${BCH_NODE_IP}/$${BCH_RPC_PORT}) >/dev/null 2>&1; do sleep 2; done; echo "BCHN RPC erreichbar - warte 10 Sekunden auf Initialisierung..."; sleep 10; echo "BCHN bereit - starte RZO BCH Pool"; exec /usr/local/bin/para pool --address 0.0.0.0 --port 43069 --high-diff-port 43068 --http-port 43070 --chain mainnet --bitcoin-rpc-host "$${BCH_NODE_IP}" --bitcoin-rpc-port "$${BCH_RPC_PORT}" --bitcoin-rpc-username "$${BCH_RPC_USER}" --bitcoin-rpc-password "$${BCH_RPC_PASS}" --start-diff 1000 --min-diff 512 --vardiff-period 3.33 --vardiff-window 300 --update-interval 20 --zmq-block-notifications "tcp://$${BCH_NODE_IP}:$${BCH_ZMQ_PORT}" --enonce1-size 4 --enonce2-size 8 --bitcoind-timeout 60 --data-dir /data --store-path /data/para.redb --events-file /data/events.json'
 
     ports:
       - "43068:43068"
@@ -118,7 +85,7 @@ services:
       RZO_WEBUI_BASE: http://rzo-bch-webui:2030
 
     volumes:
-      - ./widget:/widget:ro
+      - ${APP_DATA_DIR}/widget:/widget:ro
 
     command:
       - python3

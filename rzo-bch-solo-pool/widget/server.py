@@ -51,6 +51,7 @@ class Handler(BaseHTTPRequestHandler):
 
             payload = {
                 "type": "four-stats",
+                "refresh": "5s",
                 "link": "",
                 "items": [
                     {
@@ -87,6 +88,7 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:
             body = json.dumps({
                 "type": "four-stats",
+                "refresh": "5s",
                 "link": "",
                 "items": [
                     {"title": "Hashrate", "text": "-", "subtext": "offline"},
