@@ -33,7 +33,7 @@ services:
     network_mode: "service:rpc-forwarder"
 
     volumes:
-      - ./app/para/para:/usr/local/bin/para:ro
+      - ${APP_DATA_DIR}/app/para/para:/usr/local/bin/para:ro
       - ${APP_DATA_DIR}/data/para:/data
 
     environment:
@@ -98,7 +98,7 @@ services:
       PYTHONDONTWRITEBYTECODE: "1"
 
     volumes:
-      - ./app/webui:/app:ro
+      - ${APP_DATA_DIR}/app/webui:/app:ro
       - ${APP_DATA_DIR}/data/webui:/home/umbrel/rzo-webui-data
       - ${APP_DATA_DIR}/data/para:/home/umbrel/para-data:ro
 
@@ -122,7 +122,7 @@ services:
       RZO_WEBUI_BASE: http://rpc-forwarder:2020
 
     volumes:
-      - ./widget:/widget:ro
+      - ${APP_DATA_DIR}/widget:/widget:ro
 
     command:
       - python3
