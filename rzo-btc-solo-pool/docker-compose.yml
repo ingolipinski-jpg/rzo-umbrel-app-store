@@ -4,7 +4,7 @@ services:
 
   app_proxy:
     environment:
-      APP_HOST: rpc-forwarder
+      APP_HOST: webui
       APP_PORT: 2020
 
   rpc-forwarder:
