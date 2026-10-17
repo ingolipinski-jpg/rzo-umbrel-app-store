@@ -20,6 +20,12 @@ set_correct_permissions() {
 	fi
 }
 
+# Ensure writable runtime directories for the app container (UID/GID 1000).
+# Only change the directory ownership itself; never recursively chown the
+# Bitcoin blockchain/chainstate data.
+mkdir -p "${DATA_ROOT}/bitcoin" "${DATA_ROOT}/app"
+chown "${DESIRED_OWNER}" "${DATA_ROOT}/bitcoin" "${DATA_ROOT}/app"
+
 # We set the correct permissions for any files that may have been created by a previous app running as root:
 set_correct_permissions "${DATA_ROOT}/bitcoin/umbrel-bitcoin.conf"
 set_correct_permissions "${DATA_ROOT}/bitcoin/bitcoin.conf"

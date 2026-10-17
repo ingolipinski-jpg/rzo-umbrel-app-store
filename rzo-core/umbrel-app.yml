@@ -6,7 +6,7 @@ storage:
 
 category: bitcoin
 name: RZO Core
-version: "1.0.0"
+version: "1.0.1"
 
 tagline: Bitcoin Core optimized for RZO solo mining
 
@@ -41,12 +41,12 @@ path: ""
 defaultPassword: ""
 
 releaseNotes: >-
-  Initial RZO Core release based on Bitcoin Core v31.1.
+  Fixes first-install permissions for the Bitcoin data directory.
 
 
-  Includes the RZO FastTemplate and FastJob patch series,
-  mining-oriented configuration defaults, reproducible build verification,
-  Tor and I2P support, and integration with the RZO Bitcoin Solo Pool.
+  RZO Core now ensures that the Bitcoin runtime directory is writable
+  by the Bitcoin Core application container before startup, preventing
+  the node from failing to create its generated configuration files.
 
 widgets:
   - id: "stats"
