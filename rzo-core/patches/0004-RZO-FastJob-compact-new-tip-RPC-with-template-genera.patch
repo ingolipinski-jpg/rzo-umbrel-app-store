@@ -1,0 +1,886 @@
+From 0e8b539335eb57574656e6f073faad563555f3a2 Mon Sep 17 00:00:00 2001
+From: Ingo Lipinski <ingo@rechenzauberonline.local>
+Date: Wed, 14 Oct 2026 22:55:38 +0000
+Subject: [PATCH 4/7] RZO FastJob: compact new-tip RPC with template
+ generations
+
+---
+ src/httprpc.cpp         |  39 ++++-
+ src/interfaces/mining.h |  47 ++++++
+ src/node/interfaces.cpp | 249 +++++++++++++++++++++++++++++++-
+ src/rpc/mining.cpp      | 310 ++++++++++++++++++++++++++++++++++++----
+ 4 files changed, 607 insertions(+), 38 deletions(-)
+
+diff --git a/src/httprpc.cpp b/src/httprpc.cpp
+index 56a2430..8c17553 100644
+--- a/src/httprpc.cpp
++++ b/src/httprpc.cpp
+@@ -15,6 +15,7 @@
+ #include <util/fs_helpers.h>
+ #include <util/strencodings.h>
+ #include <util/string.h>
++#include <util/time.h>
+ #include <walletinitinterface.h>
+ 
+ #include <algorithm>
+@@ -142,6 +143,13 @@ static bool HTTPReq_JSONRPC(const std::any& context, HTTPRequest* req)
+         jreq.URI = req->GetURI();
+ 
+         UniValue reply;
++
++        // RZO instrumentation:
++        // true only for a top-level singleton getblocktemplate request.
++        // A JSON-RPC batch must never inherit the method name of its
++        // last processed element for response-level timing logs.
++        bool rzo_single_gbt_request{false};
++
+         bool user_has_whitelist = g_rpc_whitelist.contains(jreq.authUser);
+         if (!user_has_whitelist && g_rpc_whitelist_default) {
+             LogWarning("RPC User %s not allowed to call any methods", jreq.authUser);
+@@ -162,8 +170,23 @@ static bool HTTPReq_JSONRPC(const std::any& context, HTTPRequest* req)
+             // 2.0 behavior is to catch exceptions and return HTTP success with
+             // RPC errors, as long as there is not an actual HTTP server error.
+             const bool catch_errors{jreq.m_json_version == JSONRPCVersion::V2};
++
++            const bool rzo_is_gbt{jreq.strMethod == "getblocktemplate"};
++            rzo_single_gbt_request = rzo_is_gbt;
++
++            const auto rzo_rpc_exec_start{SteadyClock::now()};
++
+             reply = JSONRPCExec(jreq, catch_errors);
+ 
++            const auto rzo_rpc_exec_done{SteadyClock::now()};
++
++            if (rzo_is_gbt) {
++                LogInfo(
++                    "[RZO-GBT] stage=rpc_exec_done exec_us=%d\n",
++                    Ticks<std::chrono::microseconds>(
++                        rzo_rpc_exec_done - rzo_rpc_exec_start));
++            }
++
+             if (jreq.IsNotification()) {
+                 // Even though we do execute notifications, we do not respond to them
+                 req->WriteReply(HTTP_NO_CONTENT);
+@@ -226,7 +249,21 @@ static bool HTTPReq_JSONRPC(const std::any& context, HTTPRequest* req)
+             throw JSONRPCError(RPC_PARSE_ERROR, "Top-level object parse error");
+ 
+         req->WriteHeader("Content-Type", "application/json");
+-        req->WriteReply(HTTP_OK, reply.write() + "\n");
++
++        const auto rzo_json_start{SteadyClock::now()};
++        std::string reply_string{reply.write()};
++        reply_string += "\n";
++        const auto rzo_json_done{SteadyClock::now()};
++
++        if (rzo_single_gbt_request) {
++            LogInfo(
++                "[RZO-GBT] stage=json_done json_us=%d bytes=%u\n",
++                Ticks<std::chrono::microseconds>(
++                    rzo_json_done - rzo_json_start),
++                static_cast<unsigned int>(reply_string.size()));
++        }
++
++        req->WriteReply(HTTP_OK, reply_string);
+     } catch (UniValue& e) {
+         JSONErrorReply(req, std::move(e), jreq);
+         return false;
+diff --git a/src/interfaces/mining.h b/src/interfaces/mining.h
+index 1dec239..0077228 100644
+--- a/src/interfaces/mining.h
++++ b/src/interfaces/mining.h
+@@ -24,9 +24,36 @@ struct NodeContext;
+ 
+ class BlockValidationState;
+ class CScript;
++class UniValue;
+ 
+ namespace interfaces {
+ 
++/**
++ * RZO new-tip fast mining job.
++ *
++ * Contains only the information a Stratum server needs to construct
++ * coinbase work and mining.notify. No full transaction serialization
++ * is carried on this path.
++ */
++struct RZOFastMiningJob
++{
++    // Process-local monotonically increasing identifier for this exact
++    // prepared mining template. A node restart intentionally resets it.
++    uint64_t template_id{0};
++
++    // Header fields produced by the exact prepared CBlockTemplate.
++    CBlockHeader header;
++
++    // Height of the block being mined.
++    int height{0};
++
++    // Core-native coinbase requirements for this exact template.
++    node::CoinbaseTx coinbase;
++
++    // Merkle path from the coinbase transaction to the block merkle root.
++    std::vector<uint256> merkle_branches;
++};
++
+ //! Block template interface
+ class BlockTemplate
+ {
+@@ -42,6 +69,14 @@ public:
+     // Sigop cost per transaction, not including coinbase transaction.
+     virtual std::vector<int64_t> getTxSigops() = 0;
+ 
++    /**
++     * RZO FastTemplate: consume a transaction array prepared asynchronously
++     * for this exact template. Returns nullptr if none is ready.
++     *
++     * The normal GBT transaction construction remains the fallback.
++     */
++    virtual std::unique_ptr<UniValue> takePreparedTransactions() = 0;
++
+     /** Return fields needed to construct a coinbase transaction */
+     virtual node::CoinbaseTx getCoinbaseTx() = 0;
+ 
+@@ -143,6 +178,18 @@ public:
+         MillisecondsDouble timeout,
+         unsigned int& transactions_updated) = 0;
+ 
++    /**
++     * RZO New-Tip Fast Job: return the compact mining-job snapshot prepared
++     * for exactly `tip`. Reads are non-destructive so an RPC retry can obtain
++     * the same exact job. A newer tip replaces the cached snapshot.
++     *
++     * This cache is independent of getblocktemplate and does not alter the
++     * normal GBT refresh path.
++     */
++    virtual std::optional<RZOFastMiningJob> getPreparedMiningJob(
++        const uint256& tip,
++        MillisecondsDouble timeout) = 0;
++
+     /**
+      * Interrupts createNewBlock and waitTipChanged.
+      */
+diff --git a/src/node/interfaces.cpp b/src/node/interfaces.cpp
+index 12385fd..6eac997 100644
+--- a/src/node/interfaces.cpp
++++ b/src/node/interfaces.cpp
+@@ -10,6 +10,7 @@
+ #include <common/args.h>
+ #include <consensus/merkle.h>
+ #include <consensus/validation.h>
++#include <core_io.h>
+ #include <deploymentstatus.h>
+ #include <external_signer.h>
+ #include <index/blockfilterindex.h>
+@@ -67,6 +68,7 @@
+ #include <any>
+ #include <chrono>
+ #include <condition_variable>
++#include <map>
+ #include <memory>
+ #include <mutex>
+ #include <optional>
+@@ -866,14 +868,74 @@ public:
+     NodeContext& m_node;
+ };
+ 
++struct RZOPreparedTransactionsState
++{
++    std::mutex mutex;
++    std::unique_ptr<UniValue> transactions;
++};
++
++static std::unique_ptr<UniValue> RZOBuildPreparedTransactions(
++    const std::vector<CTransactionRef>& block_transactions,
++    const std::vector<CAmount>& tx_fees,
++    const std::vector<int64_t>& tx_sigops)
++{
++    auto transactions{std::make_unique<UniValue>(UniValue::VARR)};
++
++    if (block_transactions.empty()) {
++        return transactions;
++    }
++
++    transactions->reserve(block_transactions.size() - 1);
++
++    std::map<Txid, int64_t> tx_index;
++
++    int i{0};
++    for (const auto& tx_ref : block_transactions) {
++        const CTransaction& tx{*tx_ref};
++
++        const Txid tx_hash{tx.GetHash()};
++        tx_index[tx_hash] = i++;
++
++        if (tx.IsCoinBase()) {
++            continue;
++        }
++
++        UniValue deps(UniValue::VARR);
++        for (const CTxIn& in : tx.vin) {
++            if (tx_index.contains(in.prevout.hash)) {
++                deps.push_back(tx_index[in.prevout.hash]);
++            }
++        }
++
++        UniValue entry(UniValue::VOBJ);
++        entry.pushKV("data", EncodeHexTx(tx));
++        entry.pushKV("txid", tx_hash.GetHex());
++        entry.pushKV("hash", tx.GetWitnessHash().GetHex());
++        entry.pushKV("depends", std::move(deps));
++
++        const int index_in_template{i - 2};
++        entry.pushKV("fee", tx_fees.at(index_in_template));
++        entry.pushKV("sigops", tx_sigops.at(index_in_template));
++        entry.pushKV("weight", GetTransactionWeight(tx));
++
++        transactions->push_back(std::move(entry));
++    }
++
++    return transactions;
++}
++
+ class BlockTemplateImpl : public BlockTemplate
+ {
+ public:
+-    explicit BlockTemplateImpl(BlockAssembler::Options assemble_options,
+-                               std::unique_ptr<CBlockTemplate> block_template,
+-                               NodeContext& node) : m_assemble_options(std::move(assemble_options)),
+-                                                    m_block_template(std::move(block_template)),
+-                                                    m_node(node)
++    explicit BlockTemplateImpl(
++        BlockAssembler::Options assemble_options,
++        std::unique_ptr<CBlockTemplate> block_template,
++        NodeContext& node,
++        std::shared_ptr<RZOPreparedTransactionsState> prepared_transactions = {})
++        : m_assemble_options(std::move(assemble_options)),
++          m_block_template(std::move(block_template)),
++          m_prepared_transactions(std::move(prepared_transactions)),
++          m_node(node)
+     {
+         assert(m_block_template);
+     }
+@@ -898,6 +960,16 @@ public:
+         return m_block_template->vTxSigOpsCost;
+     }
+ 
++    std::unique_ptr<UniValue> takePreparedTransactions() override
++    {
++        if (!m_prepared_transactions) {
++            return nullptr;
++        }
++
++        std::lock_guard<std::mutex> lock{m_prepared_transactions->mutex};
++        return std::move(m_prepared_transactions->transactions);
++    }
++
+     CoinbaseTx getCoinbaseTx() override
+     {
+         return m_block_template->m_coinbase_tx;
+@@ -930,6 +1002,8 @@ public:
+ 
+     const std::unique_ptr<CBlockTemplate> m_block_template;
+ 
++    std::shared_ptr<RZOPreparedTransactionsState> m_prepared_transactions;
++
+     bool m_interrupt_wait{false};
+     ChainstateManager& chainman() { return *Assert(m_node.chainman); }
+     KernelNotifications& notifications() { return *Assert(m_node.notifications); }
+@@ -1038,16 +1112,119 @@ public:
+                     current_tip->hash == expected_tip.hash};
+ 
+                 bool cached{false};
++                std::shared_ptr<RZOPreparedTransactionsState> prepared_tx_state;
++
++                // Take only cheap snapshots before publishing the template.
++                // CTransactionRef copies keep the immutable transactions alive
++                // while the JSON representation is built after publication.
++                std::vector<CTransactionRef> prepared_block_transactions;
++                std::vector<CAmount> prepared_tx_fees;
++                std::vector<int64_t> prepared_tx_sigops;
++
++                // RZO New-Tip Fast Job snapshots. These are cheap copies.
++                CBlockHeader prepared_block_header;
++                CoinbaseTx prepared_coinbase;
++
+                 if (prepared && prev_match && active_tip_match) {
++                    prepared_tx_state =
++                        std::make_shared<RZOPreparedTransactionsState>();
++
++                    prepared_block_transactions = prepared->block.vtx;
++                    prepared_tx_fees = prepared->vTxFees;
++                    prepared_tx_sigops = prepared->vTxSigOpsCost;
++                    prepared_block_header = prepared->block;
++                    prepared_coinbase = prepared->m_coinbase_tx;
++
+                     {
+                         std::lock_guard<std::mutex> lock{m_fasttemplate_cache_mutex};
+                         m_fasttemplate_prepared_tip = expected_tip.hash;
+                         m_fasttemplate_prepared_transactions_updated =
+                             transactions_updated;
++                        m_fasttemplate_prepared_transactions_state =
++                            prepared_tx_state;
+                         m_fasttemplate_prepared = std::move(prepared);
+                         cached = true;
+                     }
++
++                    // Critical point: wake GBT as soon as the block template is
++                    // available. Transaction JSON preparation happens only after
++                    // this notification and therefore cannot delay template hit.
++                    m_fasttemplate_cache_cv.notify_all();
++
++                    // Build the compact RZO mining job only after publishing
++                    // the existing FastTemplate. Therefore this cannot delay
++                    // the current getblocktemplate wake-up path.
++                    const auto fastjob_start{
++                        std::chrono::steady_clock::now()};
++
++                    CBlock fastjob_merkle_block;
++                    fastjob_merkle_block.vtx = prepared_block_transactions;
++
++                    interfaces::RZOFastMiningJob fastjob;
++                    fastjob.header = prepared_block_header;
++                    fastjob.height = expected_tip.height + 1;
++                    fastjob.coinbase = prepared_coinbase;
++                    fastjob.merkle_branches =
++                        TransactionMerklePath(fastjob_merkle_block, 0);
++
++                    const unsigned int fastjob_branch_count{
++                        static_cast<unsigned int>(
++                            fastjob.merkle_branches.size())};
++
++                    const int64_t fastjob_us{
++                        std::chrono::duration_cast<std::chrono::microseconds>(
++                            std::chrono::steady_clock::now() - fastjob_start)
++                            .count()};
++
++                    {
++                        std::lock_guard<std::mutex> lock{
++                            m_fasttemplate_cache_mutex};
++
++                        // Allocate one unique process-local generation for
++                        // this exact prepared mining template.
++                        fastjob.template_id = ++m_fastjob_generation;
++                        m_fastjob_prepared = std::move(fastjob);
++                    }
++
++                    // Wake future rzo_getminingjob consumers independently.
+                     m_fasttemplate_cache_cv.notify_all();
++
++                    LogInfo(
++                        "[RZO-FastJob] prepared "
++                        "height=%d tip=%s branches=%u build_us=%d\n",
++                        expected_tip.height + 1,
++                        expected_tip.hash.ToString(),
++                        fastjob_branch_count,
++                        fastjob_us);
++
++                    const auto tx_prepare_start{
++                        std::chrono::steady_clock::now()};
++
++                    auto prepared_transactions{
++                        RZOBuildPreparedTransactions(
++                            prepared_block_transactions,
++                            prepared_tx_fees,
++                            prepared_tx_sigops)};
++
++                    const int64_t tx_prepare_us{
++                        std::chrono::duration_cast<std::chrono::microseconds>(
++                            std::chrono::steady_clock::now() - tx_prepare_start)
++                            .count()};
++
++                    {
++                        std::lock_guard<std::mutex> lock{
++                            prepared_tx_state->mutex};
++                        prepared_tx_state->transactions =
++                            std::move(prepared_transactions);
++                    }
++
++                    LogInfo(
++                        "[RZO-FastTemplate] prepared_transactions "
++                        "height=%d tip=%s txs=%d build_us=%d\n",
++                        expected_tip.height,
++                        expected_tip.hash.ToString(),
++                        tx_count,
++                        tx_prepare_us);
+                 }
+ 
+                 LogInfo(
+@@ -1190,6 +1367,9 @@ public:
+ 
+         std::unique_ptr<CBlockTemplate> prepared{
+             std::move(m_fasttemplate_prepared)};
++        std::shared_ptr<RZOPreparedTransactionsState> prepared_tx_state{
++            std::move(m_fasttemplate_prepared_transactions_state)};
++
+         transactions_updated =
+             m_fasttemplate_prepared_transactions_updated;
+ 
+@@ -1215,7 +1395,57 @@ public:
+         return std::make_unique<BlockTemplateImpl>(
+             assemble_options,
+             std::move(prepared),
+-            m_node);
++            m_node,
++            std::move(prepared_tx_state));
++    }
++
++    std::optional<interfaces::RZOFastMiningJob> getPreparedMiningJob(
++        const uint256& tip,
++        MillisecondsDouble timeout) override
++    {
++        const auto wait_start{std::chrono::steady_clock::now()};
++
++        std::unique_lock<std::mutex> lock{m_fasttemplate_cache_mutex};
++
++        if (!m_fasttemplate_started) {
++            return std::nullopt;
++        }
++
++        const bool ready{
++            m_fasttemplate_cache_cv.wait_for(
++                lock,
++                std::chrono::duration_cast<std::chrono::steady_clock::duration>(
++                    timeout),
++                [this, &tip] {
++                    return m_fastjob_prepared &&
++                           m_fastjob_prepared->header.hashPrevBlock == tip;
++                })};
++
++        if (!ready ||
++            !m_fastjob_prepared ||
++            m_fastjob_prepared->header.hashPrevBlock != tip) {
++            return std::nullopt;
++        }
++
++        // Non-destructive read. The job remains available for RPC retries
++        // until the worker replaces it with the next tip's snapshot.
++        std::optional<interfaces::RZOFastMiningJob> job{
++            *m_fastjob_prepared};
++
++        lock.unlock();
++
++        const int64_t wait_us{
++            std::chrono::duration_cast<std::chrono::microseconds>(
++                std::chrono::steady_clock::now() - wait_start)
++                .count()};
++
++        LogInfo(
++            "[RZO-FastJob] cache hit "
++            "tip=%s wait_us=%d\n",
++            tip.ToString(),
++            wait_us);
++
++        return job;
+     }
+ 
+     void interrupt() override
+@@ -1253,7 +1483,14 @@ public:
+     bool m_fasttemplate_started{false};
+     uint256 m_fasttemplate_prepared_tip{uint256::ZERO};
+     unsigned int m_fasttemplate_prepared_transactions_updated{0};
++    std::shared_ptr<RZOPreparedTransactionsState>
++        m_fasttemplate_prepared_transactions_state;
+     std::unique_ptr<CBlockTemplate> m_fasttemplate_prepared;
++
++    // Independent compact job for the immediate new-tip fast path.
++    // Retained until replaced by the next tip so RPC retries are harmless.
++    uint64_t m_fastjob_generation{0};
++    std::optional<interfaces::RZOFastMiningJob> m_fastjob_prepared;
+ };
+ } // namespace
+ } // namespace node
+diff --git a/src/rpc/mining.cpp b/src/rpc/mining.cpp
+index 9ec71ce..b6d2475 100644
+--- a/src/rpc/mining.cpp
++++ b/src/rpc/mining.cpp
+@@ -19,6 +19,7 @@
+ #include <deploymentstatus.h>
+ #include <interfaces/mining.h>
+ #include <key_io.h>
++#include <logging.h>
+ #include <net.h>
+ #include <node/context.h>
+ #include <node/miner.h>
+@@ -45,6 +46,7 @@
+ 
+ #include <cstdint>
+ #include <memory>
++#include <span>
+ 
+ using interfaces::BlockRef;
+ using interfaces::BlockTemplate;
+@@ -887,6 +889,11 @@ static RPCHelpMan getblocktemplate()
+         mempool.GetTransactionsUpdated() != nTransactionsUpdatedLast &&
+         GetTime() - time_start > 5};
+ 
++    const auto rzo_template_phase_start{SteadyClock::now()};
++    bool rzo_prepared_hit{false};
++    bool rzo_sync_build{false};
++    int64_t rzo_sync_build_us{0};
++
+     if (tip_changed || mempool_refresh)
+     {
+         std::unique_ptr<BlockTemplate> prepared_template;
+@@ -925,6 +932,8 @@ static RPCHelpMan getblocktemplate()
+             chainman.m_blockman.LookupBlockIndex(tip);
+ 
+         if (prepared_template) {
++            rzo_prepared_hit = true;
++
+             // Preserve the mempool state from immediately before the worker
+             // assembled this template. This keeps the normal >5 s mempool
+             // refresh semantics accurate if transactions arrived meanwhile.
+@@ -934,9 +943,17 @@ static RPCHelpMan getblocktemplate()
+             // Normal Bitcoin Core fallback: snapshot the current mempool
+             // counter immediately before synchronous template creation.
+             nTransactionsUpdatedLast = mempool.GetTransactionsUpdated();
++
++            rzo_sync_build = true;
++            const auto rzo_sync_build_start{SteadyClock::now()};
++
+             block_template = miner.createNewBlock(
+                 {.include_dummy_extranonce = true},
+                 /*cooldown=*/false);
++
++            rzo_sync_build_us =
++                Ticks<std::chrono::microseconds>(
++                    SteadyClock::now() - rzo_sync_build_start);
+         }
+         CHECK_NONFATAL(block_template);
+ 
+@@ -944,9 +961,23 @@ static RPCHelpMan getblocktemplate()
+         pindexPrev = pindexPrevNew;
+     }
+ 
++    const auto rzo_template_phase_done{SteadyClock::now()};
++
++    LogInfo(
++        "[RZO-GBT] stage=template_phase tip_changed=%d mempool_refresh=%d prepared_hit=%d sync_build=%d sync_build_us=%d phase_us=%d\n",
++        tip_changed,
++        mempool_refresh,
++        rzo_prepared_hit,
++        rzo_sync_build,
++        rzo_sync_build_us,
++        Ticks<std::chrono::microseconds>(
++            rzo_template_phase_done - rzo_template_phase_start));
++
+     // From here onward cs_main again provides the stock GBT serialization.
+     template_cache_lock.unlock();
+ 
++    const auto rzo_gbt_response_start{SteadyClock::now()};
++
+     CHECK_NONFATAL(pindexPrev);
+     CBlock block{block_template->getBlock()};
+ 
+@@ -960,46 +991,116 @@ static RPCHelpMan getblocktemplate()
+     UniValue aCaps(UniValue::VARR); aCaps.push_back("proposal");
+ 
+     UniValue transactions(UniValue::VARR);
+-    std::map<Txid, int64_t> setTxIndex;
+-    std::vector<CAmount> tx_fees{block_template->getTxFees()};
+-    std::vector<CAmount> tx_sigops{block_template->getTxSigops()};
+ 
+-    int i = 0;
+-    for (const auto& it : block.vtx) {
+-        const CTransaction& tx = *it;
+-        Txid txHash = tx.GetHash();
+-        setTxIndex[txHash] = i++;
++    // RZO FastTemplate phase 2:
++    // If the proactive worker already finished the immutable transaction
++    // representation for this exact template, consume it with no waiting.
++    // Otherwise execute the normal Bitcoin Core GBT transaction loop.
++    bool rzo_prepared_transactions_hit{false};
+ 
+-        if (tx.IsCoinBase())
+-            continue;
++    if (!fPreSegWit) {
++        if (auto prepared_transactions{
++                block_template->takePreparedTransactions()}) {
++            transactions = std::move(*prepared_transactions);
++            rzo_prepared_transactions_hit = true;
++        }
++    }
+ 
+-        UniValue entry(UniValue::VOBJ);
++    if (!rzo_prepared_transactions_hit) {
++        std::map<Txid, int64_t> setTxIndex;
++        std::vector<CAmount> tx_fees{block_template->getTxFees()};
++        std::vector<CAmount> tx_sigops{block_template->getTxSigops()};
+ 
+-        entry.pushKV("data", EncodeHexTx(tx));
+-        entry.pushKV("txid", txHash.GetHex());
+-        entry.pushKV("hash", tx.GetWitnessHash().GetHex());
++        int64_t rzo_encode_us{0};
++        int64_t rzo_hash_dep_us{0};
++        int64_t rzo_univalue_us{0};
+ 
+-        UniValue deps(UniValue::VARR);
+-        for (const CTxIn &in : tx.vin)
+-        {
+-            if (setTxIndex.contains(in.prevout.hash))
+-                deps.push_back(setTxIndex[in.prevout.hash]);
+-        }
+-        entry.pushKV("depends", std::move(deps));
+-
+-        int index_in_template = i - 2;
+-        entry.pushKV("fee", tx_fees.at(index_in_template));
+-        int64_t nTxSigOps{tx_sigops.at(index_in_template)};
+-        if (fPreSegWit) {
+-            CHECK_NONFATAL(nTxSigOps % WITNESS_SCALE_FACTOR == 0);
+-            nTxSigOps /= WITNESS_SCALE_FACTOR;
++        int i = 0;
++        for (const auto& it : block.vtx) {
++            const CTransaction& tx = *it;
++
++            const auto rzo_hash_dep_start{SteadyClock::now()};
++
++            Txid txHash = tx.GetHash();
++            setTxIndex[txHash] = i++;
++
++            if (tx.IsCoinBase())
++                continue;
++
++            const auto rzo_hash_dep_mid{SteadyClock::now()};
++
++            UniValue deps(UniValue::VARR);
++            for (const CTxIn &in : tx.vin)
++            {
++                if (setTxIndex.contains(in.prevout.hash))
++                    deps.push_back(setTxIndex[in.prevout.hash]);
++            }
++
++            const auto rzo_hash_dep_done{SteadyClock::now()};
++
++            rzo_hash_dep_us +=
++                Ticks<std::chrono::microseconds>(
++                    rzo_hash_dep_mid - rzo_hash_dep_start) +
++                Ticks<std::chrono::microseconds>(
++                    rzo_hash_dep_done - rzo_hash_dep_mid);
++
++            const auto rzo_encode_start{SteadyClock::now()};
++            std::string rzo_tx_hex{EncodeHexTx(tx)};
++            const auto rzo_encode_done{SteadyClock::now()};
++
++            rzo_encode_us +=
++                Ticks<std::chrono::microseconds>(
++                    rzo_encode_done - rzo_encode_start);
++
++            const auto rzo_univalue_start{SteadyClock::now()};
++
++            UniValue entry(UniValue::VOBJ);
++
++            entry.pushKV("data", std::move(rzo_tx_hex));
++            entry.pushKV("txid", txHash.GetHex());
++            entry.pushKV("hash", tx.GetWitnessHash().GetHex());
++            entry.pushKV("depends", std::move(deps));
++
++            int index_in_template = i - 2;
++            entry.pushKV("fee", tx_fees.at(index_in_template));
++            int64_t nTxSigOps{tx_sigops.at(index_in_template)};
++            if (fPreSegWit) {
++                CHECK_NONFATAL(
++                    nTxSigOps % WITNESS_SCALE_FACTOR == 0);
++                nTxSigOps /= WITNESS_SCALE_FACTOR;
++            }
++            entry.pushKV("sigops", nTxSigOps);
++            entry.pushKV("weight", GetTransactionWeight(tx));
++
++            transactions.push_back(std::move(entry));
++
++            rzo_univalue_us +=
++                Ticks<std::chrono::microseconds>(
++                    SteadyClock::now() - rzo_univalue_start);
+         }
+-        entry.pushKV("sigops", nTxSigOps);
+-        entry.pushKV("weight", GetTransactionWeight(tx));
+ 
+-        transactions.push_back(std::move(entry));
++        LogInfo(
++            "[RZO-GBT] stage=tx_loop_breakdown "
++            "txs=%u encode_us=%d hash_dep_us=%d univalue_us=%d\n",
++            static_cast<unsigned int>(block.vtx.size() - 1),
++            rzo_encode_us,
++            rzo_hash_dep_us,
++            rzo_univalue_us);
+     }
+ 
++    LogInfo(
++        "[RZO-GBT] stage=tx_array_source "
++        "prepared_hit=%d txs=%u\n",
++        rzo_prepared_transactions_hit,
++        static_cast<unsigned int>(block.vtx.size() - 1));
++
++    const auto rzo_gbt_transactions_done{SteadyClock::now()};
++    LogInfo(
++        "[RZO-GBT] stage=transactions_done txs=%u tx_array_us=%d\n",
++        static_cast<unsigned int>(block.vtx.size() - 1),
++        Ticks<std::chrono::microseconds>(
++            rzo_gbt_transactions_done - rzo_gbt_response_start));
++
+     UniValue aux(UniValue::VOBJ);
+ 
+     arith_uint256 hashTarget = arith_uint256().SetCompact(block.nBits);
+@@ -1089,6 +1190,152 @@ static RPCHelpMan getblocktemplate()
+         result.pushKV("default_witness_commitment", HexStr(coinbase.required_outputs[0].scriptPubKey));
+     }
+ 
++    const auto rzo_gbt_result_done{SteadyClock::now()};
++    LogInfo(
++        "[RZO-GBT] stage=result_done txs=%u post_tx_us=%d total_build_us=%d height=%d\n",
++        static_cast<unsigned int>(block.vtx.size() - 1),
++        Ticks<std::chrono::microseconds>(
++            rzo_gbt_result_done - rzo_gbt_transactions_done),
++        Ticks<std::chrono::microseconds>(
++            rzo_gbt_result_done - rzo_gbt_response_start),
++        pindexPrev->nHeight + 1);
++
++    return result;
++},
++    };
++}
++
++
++static RPCHelpMan rzo_getminingjob()
++{
++    return RPCHelpMan{
++        "rzo_getminingjob",
++        "RZO private new-tip fast mining job.\n"
++        "Returns the compact mining data prepared proactively for exactly the "
++        "requested previous block hash.\n"
++        "Returns null if the exact prepared job is not available within the "
++        "short fast-path wait or if the active chain tip changed.\n",
++        {
++            {"previousblockhash", RPCArg::Type::STR_HEX, RPCArg::Optional::NO,
++             "Exact active tip hash observed by the caller"},
++        },
++        RPCResult{
++            RPCResult::Type::ANY,
++            "",
++            "Compact RZO mining job object, or null on fast-path miss/stale tip"},
++        RPCExamples{
++            HelpExampleCli(
++                "rzo_getminingjob",
++                "\"0000000000000000000000000000000000000000000000000000000000000000\"")
++        },
++        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
++{
++    const std::string_view expected_tip_hex{
++        self.Arg<std::string_view>("previousblockhash")};
++
++    const auto expected_tip{uint256::FromHex(expected_tip_hex)};
++    if (!expected_tip) {
++        throw JSONRPCError(
++            RPC_INVALID_PARAMETER,
++            "Invalid previousblockhash");
++    }
++
++    NodeContext& node{EnsureAnyNodeContext(request.context)};
++    Mining& miner{EnsureMining(node)};
++
++    // This path is intentionally independent of normal GBT refresh behavior.
++    // Wait only briefly for the proactive exact-tip snapshot.
++    const auto job{
++        miner.getPreparedMiningJob(
++            *expected_tip,
++            MillisecondsDouble{10})};
++
++    if (!job) {
++        return UniValue::VNULL;
++    }
++
++    // Never return work for a tip that stopped being active while we waited.
++    const auto active_tip{miner.getTip()};
++    if (!active_tip ||
++        active_tip->hash != *expected_tip ||
++        job->header.hashPrevBlock != *expected_tip) {
++        return UniValue::VNULL;
++    }
++
++    const node::CoinbaseTx& coinbase{job->coinbase};
++
++    UniValue result{UniValue::VOBJ};
++
++    // Decimal string avoids precision loss in JSON consumers that use
++    // IEEE-754 doubles for numeric values.
++    result.pushKV("template_id", std::to_string(job->template_id));
++    result.pushKV(
++        "previousblockhash",
++        job->header.hashPrevBlock.GetHex());
++    result.pushKV("height", job->height);
++    result.pushKV("version", job->header.nVersion);
++    result.pushKV("bits", strprintf("%08x", job->header.nBits));
++    result.pushKV("curtime", job->header.GetBlockTime());
++
++    UniValue coinbase_json{UniValue::VOBJ};
++    coinbase_json.pushKV("version", coinbase.version);
++    coinbase_json.pushKV("sequence", coinbase.sequence);
++    coinbase_json.pushKV(
++        "script_sig_prefix",
++        HexStr(coinbase.script_sig_prefix));
++
++    if (coinbase.witness) {
++        // IMPORTANT:
++        // uint256::GetHex() reverses base_blob byte order. The coinbase
++        // witness is an opaque 32-byte value and must be emitted exactly
++        // byte-for-byte as stored in the witness stack.
++        coinbase_json.pushKV(
++            "witness",
++            HexStr(std::span{
++                coinbase.witness->data(),
++                coinbase.witness->size()}));
++    } else {
++        coinbase_json.pushKV("witness", UniValue::VNULL);
++    }
++
++    coinbase_json.pushKV(
++        "block_reward_remaining",
++        coinbase.block_reward_remaining);
++
++    UniValue required_outputs{UniValue::VARR};
++    for (const CTxOut& output : coinbase.required_outputs) {
++        UniValue entry{UniValue::VOBJ};
++        entry.pushKV("value", output.nValue);
++        entry.pushKV(
++            "script_pub_key",
++            HexStr(output.scriptPubKey));
++        required_outputs.push_back(std::move(entry));
++    }
++
++    coinbase_json.pushKV(
++        "required_outputs",
++        std::move(required_outputs));
++    coinbase_json.pushKV("lock_time", coinbase.lock_time);
++
++    result.pushKV("coinbase", std::move(coinbase_json));
++
++    UniValue merkle_branches{UniValue::VARR};
++    merkle_branches.reserve(job->merkle_branches.size());
++
++    for (const uint256& branch : job->merkle_branches) {
++        merkle_branches.push_back(branch.GetHex());
++    }
++
++    result.pushKV(
++        "merkle_branches",
++        std::move(merkle_branches));
++
++    // One final cheap stale-tip guard after serialization.
++    const auto final_tip{miner.getTip()};
++    if (!final_tip || final_tip->hash != *expected_tip) {
++        return UniValue::VNULL;
++    }
++
+     return result;
+ },
+     };
+@@ -1212,6 +1459,7 @@ void RegisterMiningRPCCommands(CRPCTable& t)
+         {"mining", &prioritisetransaction},
+         {"mining", &getprioritisedtransactions},
+         {"mining", &getblocktemplate},
++        {"mining", &rzo_getminingjob},
+         {"mining", &submitblock},
+         {"mining", &submitheader},
+ 
+-- 
+2.47.3
+

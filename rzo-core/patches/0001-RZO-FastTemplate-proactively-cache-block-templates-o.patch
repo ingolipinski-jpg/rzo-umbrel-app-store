@@ -1,0 +1,390 @@
+From 2c855e3bcef68dab6378b0886300f31c26289d10 Mon Sep 17 00:00:00 2001
+From: Ingo Lipinski <ingo@rechenzauberonline.local>
+Date: Wed, 14 Oct 2026 06:57:13 +0000
+Subject: [PATCH 1/7] RZO FastTemplate: proactively cache block templates on
+ tip change
+
+---
+ src/init.cpp            |   5 ++
+ src/interfaces/mining.h |   8 ++
+ src/node/interfaces.cpp | 191 ++++++++++++++++++++++++++++++++++++++++
+ src/rpc/mining.cpp      |  83 ++++++++++++++---
+ 4 files changed, 275 insertions(+), 12 deletions(-)
+
+diff --git a/src/init.cpp b/src/init.cpp
+index fb4b8fa..0c0b50a 100644
+--- a/src/init.cpp
++++ b/src/init.cpp
+@@ -403,6 +403,11 @@ void Shutdown(NodeContext& node)
+     if (node.validation_signals) {
+         node.validation_signals->UnregisterAllValidationInterfaces();
+     }
++
++    // RZO FastTemplate worker depends on chainman, mempool and notifications.
++    // Destroy Mining first so its worker is interrupted and joined safely.
++    node.mining.reset();
++
+     node.mempool.reset();
+     node.fee_estimator.reset();
+     node.chainman.reset();
+diff --git a/src/interfaces/mining.h b/src/interfaces/mining.h
+index f4c42e2..99c6892 100644
+--- a/src/interfaces/mining.h
++++ b/src/interfaces/mining.h
+@@ -134,6 +134,14 @@ public:
+      */
+     virtual std::unique_ptr<BlockTemplate> createNewBlock(const node::BlockCreateOptions& options = {}, bool cooldown = true) = 0;
+ 
++    /**
++     * RZO FastTemplate: take a proactively prepared template for exactly
++     * `tip`. Returns nullptr on cache miss or timeout.
++     */
++    virtual std::unique_ptr<BlockTemplate> takePreparedTemplate(
++        const uint256& tip,
++        MillisecondsDouble timeout) = 0;
++
+     /**
+      * Interrupts createNewBlock and waitTipChanged.
+      */
+diff --git a/src/node/interfaces.cpp b/src/node/interfaces.cpp
+index 84fd5bb..2626310 100644
+--- a/src/node/interfaces.cpp
++++ b/src/node/interfaces.cpp
+@@ -65,9 +65,13 @@
+ #include <bitcoin-build-config.h> // IWYU pragma: keep
+ 
+ #include <any>
++#include <chrono>
++#include <condition_variable>
+ #include <memory>
++#include <mutex>
+ #include <optional>
+ #include <stdexcept>
++#include <thread>
+ #include <utility>
+ 
+ #include <boost/signals2/signal.hpp>
+@@ -937,6 +941,130 @@ class MinerImpl : public Mining
+ public:
+     explicit MinerImpl(NodeContext& node) : m_node(node) {}
+ 
++    ~MinerImpl() override
++    {
++        if (m_fasttemplate_thread.joinable()) {
++            InterruptWait(notifications(), m_interrupt_fasttemplate);
++            m_fasttemplate_thread.join();
++            LogInfo("[RZO-FastTemplate] worker stopped\n");
++        }
++    }
++
++    void StartFastTemplateWorker(const uint256& current_tip)
++    {
++        std::call_once(m_fasttemplate_once, [this, current_tip] {
++            m_fasttemplate_thread =
++                std::thread{&MinerImpl::FastTemplateWorker, this, current_tip};
++
++            {
++                std::lock_guard<std::mutex> lock{m_fasttemplate_cache_mutex};
++                m_fasttemplate_started = true;
++            }
++
++            LogInfo(
++                "[RZO-FastTemplate] worker started "
++                "watched_tip=%s\n",
++                current_tip.ToString());
++        });
++    }
++
++    void FastTemplateWorker(uint256 watched_tip)
++    {
++        while (true) {
++            MillisecondsDouble timeout{MillisecondsDouble::max()};
++
++            std::optional<BlockRef> maybe_tip{
++                WaitTipChanged(
++                    chainman(),
++                    notifications(),
++                    watched_tip,
++                    timeout,
++                    m_interrupt_fasttemplate)};
++
++            // WaitTipChanged() returns nullopt only when interrupted/shutting down.
++            if (!maybe_tip) {
++                break;
++            }
++
++            const BlockRef expected_tip{*maybe_tip};
++            watched_tip = expected_tip.hash;
++
++            // Do not start expensive work once global shutdown has begun.
++            if (bool{*Assert(m_node.shutdown_signal)}) {
++                break;
++            }
++
++            try {
++                BlockAssembler::Options assemble_options{};
++                assemble_options.include_dummy_extranonce = true;
++                ApplyArgsManOptions(*Assert(m_node.args), assemble_options);
++
++                const auto started{std::chrono::steady_clock::now()};
++
++                std::unique_ptr<CBlockTemplate> prepared{
++                    BlockAssembler{
++                        chainman().ActiveChainstate(),
++                        m_node.mempool.get(),
++                        assemble_options}
++                        .CreateNewBlock()};
++
++                const auto finished{std::chrono::steady_clock::now()};
++                const int64_t build_us{
++                    std::chrono::duration_cast<std::chrono::microseconds>(
++                        finished - started)
++                        .count()};
++
++                bool prev_match{false};
++                int64_t tx_count{-1};
++
++                if (prepared) {
++                    prev_match =
++                        prepared->block.hashPrevBlock == expected_tip.hash;
++
++                    if (!prepared->block.vtx.empty()) {
++                        tx_count =
++                            static_cast<int64_t>(prepared->block.vtx.size() - 1);
++                    }
++                }
++
++                const std::optional<BlockRef> current_tip{GetTip(chainman())};
++                const bool active_tip_match{
++                    current_tip &&
++                    current_tip->hash == expected_tip.hash};
++
++                bool cached{false};
++                if (prepared && prev_match && active_tip_match) {
++                    {
++                        std::lock_guard<std::mutex> lock{m_fasttemplate_cache_mutex};
++                        m_fasttemplate_prepared_tip = expected_tip.hash;
++                        m_fasttemplate_prepared = std::move(prepared);
++                        cached = true;
++                    }
++                    m_fasttemplate_cache_cv.notify_all();
++                }
++
++                LogInfo(
++                    "[RZO-FastTemplate] prepared "
++                    "height=%d tip=%s build_us=%d txs=%d "
++                    "prev_match=%d active_tip_match=%d cached=%d\n",
++                    expected_tip.height,
++                    expected_tip.hash.ToString(),
++                    build_us,
++                    tx_count,
++                    prev_match,
++                    active_tip_match,
++                    cached);
++            } catch (const std::exception& e) {
++                LogError(
++                    "[RZO-FastTemplate] template build failed "
++                    "height=%d tip=%s error=%s\n",
++                    expected_tip.height,
++                    expected_tip.hash.ToString(),
++                    e.what());
++            }
++        }
++    }
++
+     bool isTestChain() override
+     {
+         return chainman().GetParams().IsTestChain();
+@@ -989,11 +1117,59 @@ public:
+             if (!CooldownIfHeadersAhead(chainman(), notifications(), *maybe_tip, m_interrupt_mining)) return {};
+         }
+ 
++        // Start the RZO FastTemplate worker lazily. At this point chainman,
++        // mempool and the active tip are initialized. Seed it with the current
++        // tip so it waits for the next tip instead of rebuilding this one.
++        StartFastTemplateWorker(maybe_tip->hash);
++
+         BlockAssembler::Options assemble_options{options};
+         ApplyArgsManOptions(*Assert(m_node.args), assemble_options);
+         return std::make_unique<BlockTemplateImpl>(assemble_options, BlockAssembler{chainman().ActiveChainstate(), context()->mempool.get(), assemble_options}.CreateNewBlock(), m_node);
+     }
+ 
++    std::unique_ptr<BlockTemplate> takePreparedTemplate(
++        const uint256& tip,
++        MillisecondsDouble timeout) override
++    {
++        std::unique_lock<std::mutex> lock{m_fasttemplate_cache_mutex};
++
++        // The first GBT starts the worker through createNewBlock(). Do not
++        // delay that initial request waiting for a worker that does not exist.
++        if (!m_fasttemplate_started) return nullptr;
++
++        m_fasttemplate_cache_cv.wait_for(
++            lock,
++            std::chrono::duration_cast<std::chrono::steady_clock::duration>(timeout),
++            [this, &tip] {
++                return m_fasttemplate_prepared &&
++                       m_fasttemplate_prepared_tip == tip;
++            });
++
++        if (!m_fasttemplate_prepared ||
++            m_fasttemplate_prepared_tip != tip) {
++            return nullptr;
++        }
++
++        std::unique_ptr<CBlockTemplate> prepared{
++            std::move(m_fasttemplate_prepared)};
++        m_fasttemplate_prepared_tip = uint256::ZERO;
++
++        lock.unlock();
++
++        BlockAssembler::Options assemble_options{};
++        assemble_options.include_dummy_extranonce = true;
++        ApplyArgsManOptions(*Assert(m_node.args), assemble_options);
++
++        LogInfo(
++            "[RZO-FastTemplate] cache hit tip=%s\n",
++            tip.ToString());
++
++        return std::make_unique<BlockTemplateImpl>(
++            assemble_options,
++            std::move(prepared),
++            m_node);
++    }
++
+     void interrupt() override
+     {
+         InterruptWait(notifications(), m_interrupt_mining);
+@@ -1013,7 +1189,22 @@ public:
+     KernelNotifications& notifications() { return *Assert(m_node.notifications); }
+     // Treat as if guarded by notifications().m_tip_block_mutex
+     bool m_interrupt_mining{false};
++
++    // RZO FastTemplate worker.
++    // Interrupt flag is guarded by notifications().m_tip_block_mutex.
++    bool m_interrupt_fasttemplate{false};
+     NodeContext& m_node;
++
++    std::once_flag m_fasttemplate_once;
++    std::thread m_fasttemplate_thread;
++
++    // RZO FastTemplate one-slot cache. A template is keyed by the exact
++    // previous-block hash and consumed at most once.
++    std::mutex m_fasttemplate_cache_mutex;
++    std::condition_variable m_fasttemplate_cache_cv;
++    bool m_fasttemplate_started{false};
++    uint256 m_fasttemplate_prepared_tip{uint256::ZERO};
++    std::unique_ptr<CBlockTemplate> m_fasttemplate_prepared;
+ };
+ } // namespace
+ } // namespace node
+diff --git a/src/rpc/mining.cpp b/src/rpc/mining.cpp
+index 043e11f..76ad6bb 100644
+--- a/src/rpc/mining.cpp
++++ b/src/rpc/mining.cpp
+@@ -856,31 +856,90 @@ static RPCHelpMan getblocktemplate()
+     }
+ 
+     // Update block
++    //
++    // Stock GBT relies on cs_main to serialize access to these static cache
++    // variables. RZO FastTemplate temporarily releases cs_main while waiting
++    // for the proactive worker, so use an additional mutex to preserve that
++    // serialization across the unlocked window.
++    static Mutex template_cache_mutex;
+     static CBlockIndex* pindexPrev;
+     static int64_t time_start;
+     static std::unique_ptr<BlockTemplate> block_template;
+-    if (!pindexPrev || pindexPrev->GetBlockHash() != tip ||
+-        (mempool.GetTransactionsUpdated() != nTransactionsUpdatedLast && GetTime() - time_start > 5))
++
++    // Acquire the FastTemplate/cache mutex without holding cs_main. This lock
++    // stays held until the static GBT cache has been updated. Other GBT calls
++    // therefore cannot enter the same cache transition while this call has
++    // temporarily released cs_main.
++    std::unique_lock<Mutex> template_cache_lock;
++    {
++        REVERSE_LOCK(cs_main_lock, cs_main);
++        template_cache_lock =
++            std::unique_lock<Mutex>{template_cache_mutex};
++    }
++
++    // cs_main is locked again. It may have changed while we were acquiring the
++    // cache mutex, so always refresh the active tip before inspecting the cache.
++    tip = CHECK_NONFATAL(miner.getTip()).value().hash;
++
++    const bool tip_changed{
++        !pindexPrev || pindexPrev->GetBlockHash() != tip};
++    const bool mempool_refresh{
++        mempool.GetTransactionsUpdated() != nTransactionsUpdatedLast &&
++        GetTime() - time_start > 5};
++
++    if (tip_changed || mempool_refresh)
+     {
+-        // Clear pindexPrev so future calls make a new block, despite any failures from here on
++        std::unique_ptr<BlockTemplate> prepared_template;
++
++        // RZO FastTemplate:
++        // Only a real tip transition waits for the proactive template.
++        // template_cache_mutex remains held, but cs_main is released so the
++        // worker can run BlockAssembler::CreateNewBlock().
++        if (tip_changed) {
++            {
++                REVERSE_LOCK(cs_main_lock, cs_main);
++                prepared_template = miner.takePreparedTemplate(
++                    tip,
++                    MillisecondsDouble{10});
++            }
++
++            // cs_main is locked again here. Never consume a prepared template
++            // if the chain advanced/reorged during the short wait.
++            const uint256 current_tip{
++                CHECK_NONFATAL(miner.getTip()).value().hash};
++
++            if (current_tip != tip) {
++                tip = current_tip;
++                prepared_template.reset();
++            }
++        }
++
++        // Clear only after all unlocked waiting is complete.
+         pindexPrev = nullptr;
+ 
+-        // Store the pindexBest used before createNewBlock, to avoid races
+         nTransactionsUpdatedLast = mempool.GetTransactionsUpdated();
+-        CBlockIndex* pindexPrevNew = chainman.m_blockman.LookupBlockIndex(tip);
+         time_start = GetTime();
+ 
+-        // Create new block. Opt-out of cooldown mechanism, because it would add
+-        // a delay to each getblocktemplate call. This differs from typical
+-        // long-lived IPC usage, where the overhead is paid only when creating
+-        // the initial template.
+-        block_template = miner.createNewBlock({.include_dummy_extranonce = true}, /*cooldown=*/false);
+-        CHECK_NONFATAL(block_template);
++        CBlockIndex* pindexPrevNew =
++            chainman.m_blockman.LookupBlockIndex(tip);
+ 
++        if (prepared_template) {
++            block_template = std::move(prepared_template);
++        } else {
++            // Normal Bitcoin Core fallback.
++            block_template = miner.createNewBlock(
++                {.include_dummy_extranonce = true},
++                /*cooldown=*/false);
++        }
++        CHECK_NONFATAL(block_template);
+ 
+-        // Need to update only after we know createNewBlock succeeded
++        // Need to update only after template creation succeeded.
+         pindexPrev = pindexPrevNew;
+     }
++
++    // From here onward cs_main again provides the stock GBT serialization.
++    template_cache_lock.unlock();
++
+     CHECK_NONFATAL(pindexPrev);
+     CBlock block{block_template->getBlock()};
+ 
+-- 
+2.47.3
+

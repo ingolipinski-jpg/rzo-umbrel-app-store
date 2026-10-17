@@ -1,0 +1,30 @@
+From 51ffea2cf1442cc2d705c4f45a2cf1bce29d177a Mon Sep 17 00:00:00 2001
+From: Ingo Lipinski <ingo@rechenzauberonline.local>
+Date: Thu, 15 Oct 2026 07:03:32 +0000
+Subject: [PATCH 7/7] RZO FastJob: support Stratum version rolling
+
+---
+ src/rpc/mining.cpp | 7 +++----
+ 1 file changed, 3 insertions(+), 4 deletions(-)
+
+diff --git a/src/rpc/mining.cpp b/src/rpc/mining.cpp
+index 32c9ada..c7944e6 100644
+--- a/src/rpc/mining.cpp
++++ b/src/rpc/mining.cpp
+@@ -1501,10 +1501,9 @@ static RPCHelpMan rzo_submitminingsolution()
+         return "stale-prevblk";
+     }
+ 
+-    if (version != static_cast<uint32_t>(job->header.nVersion)) {
+-        return "bad-version";
+-    }
+-
++    // The solved header version may differ from the advertised FastJob
++    // version when the Stratum miner uses negotiated version rolling.
++    // The submitted version is validated as part of normal block validation.
+     CMutableTransaction mutable_coinbase;
+     if (!DecodeHexTx(mutable_coinbase, coinbase_hex)) {
+         throw JSONRPCError(
+-- 
+2.47.3
+

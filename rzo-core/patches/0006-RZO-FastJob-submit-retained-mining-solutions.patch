@@ -1,0 +1,296 @@
+From 169a4c1573665e32d8089e2f58150a96a812f9ed Mon Sep 17 00:00:00 2001
+From: Ingo Lipinski <ingo@rechenzauberonline.local>
+Date: Wed, 14 Oct 2026 23:56:35 +0000
+Subject: [PATCH 6/7] RZO FastJob: submit retained mining solutions
+
+---
+ src/rpc/mining.cpp | 259 +++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 259 insertions(+)
+
+diff --git a/src/rpc/mining.cpp b/src/rpc/mining.cpp
+index 897f6d5..32c9ada 100644
+--- a/src/rpc/mining.cpp
++++ b/src/rpc/mining.cpp
+@@ -44,6 +44,7 @@
+ #include <validation.h>
+ #include <validationinterface.h>
+ 
++#include <algorithm>
+ #include <cstdint>
+ #include <memory>
+ #include <span>
+@@ -1423,6 +1424,263 @@ protected:
+     }
+ };
+ 
++
++static RPCHelpMan rzo_submitminingsolution()
++{
++    return RPCHelpMan{
++        "rzo_submitminingsolution",
++        "Submit a solved RZO FastJob using its retained exact block snapshot.\n",
++        {
++            {"template_id", RPCArg::Type::STR, RPCArg::Optional::NO,
++             "Process-local FastJob generation id"},
++            {"coinbase", RPCArg::Type::STR_HEX, RPCArg::Optional::NO,
++             "Complete serialized coinbase transaction including witness"},
++            {"version", RPCArg::Type::NUM, RPCArg::Optional::NO,
++             "Solved block header version"},
++            {"ntime", RPCArg::Type::NUM, RPCArg::Optional::NO,
++             "Solved block header time"},
++            {"nonce", RPCArg::Type::NUM, RPCArg::Optional::NO,
++             "Solved block header nonce"},
++        },
++        {
++            RPCResult{"If accepted", RPCResult::Type::NONE, "", ""},
++            RPCResult{"Otherwise", RPCResult::Type::STR, "", "BIP22-style result"},
++        },
++        RPCExamples{""},
++        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
++{
++    const std::string_view id_string{
++        self.Arg<std::string_view>("template_id")};
++    const std::string id_text{id_string};
++
++    uint64_t template_id{0};
++    try {
++        size_t consumed{0};
++        template_id = std::stoull(id_text, &consumed, 10);
++        if (consumed != id_text.size()) {
++            throw std::invalid_argument{"trailing characters"};
++        }
++    } catch (const std::exception&) {
++        throw JSONRPCError(
++            RPC_INVALID_PARAMETER,
++            "template_id must be an unsigned decimal integer");
++    }
++
++    const std::string coinbase_hex{
++        self.Arg<std::string_view>("coinbase")};
++    const uint32_t version{self.Arg<uint32_t>("version")};
++    const uint32_t ntime{self.Arg<uint32_t>("ntime")};
++    const uint32_t nonce{self.Arg<uint32_t>("nonce")};
++
++    NodeContext& node{EnsureAnyNodeContext(request.context)};
++    Mining& miner{EnsureMining(node)};
++
++    const auto retained{
++        miner.getPreparedMiningBlock(template_id)};
++    if (!retained) {
++        return "stale-template";
++    }
++
++    const auto job{
++        miner.getPreparedMiningJob(
++            retained->hashPrevBlock,
++            MillisecondsDouble{0})};
++
++    if (!job || job->template_id != template_id) {
++        return "stale-template";
++    }
++
++    if (job->header.hashPrevBlock != retained->hashPrevBlock ||
++        job->header.nBits != retained->nBits) {
++        return "template-mismatch";
++    }
++
++    const auto active_tip{miner.getTip()};
++    if (!active_tip ||
++        active_tip->hash != retained->hashPrevBlock) {
++        return "stale-prevblk";
++    }
++
++    if (version != static_cast<uint32_t>(job->header.nVersion)) {
++        return "bad-version";
++    }
++
++    CMutableTransaction mutable_coinbase;
++    if (!DecodeHexTx(mutable_coinbase, coinbase_hex)) {
++        throw JSONRPCError(
++            RPC_DESERIALIZATION_ERROR,
++            "Coinbase transaction decode failed");
++    }
++
++    const node::CoinbaseTx& requirements{job->coinbase};
++
++    if (mutable_coinbase.vin.size() != 1 ||
++        !mutable_coinbase.vin[0].prevout.IsNull()) {
++        return "bad-cb-missing";
++    }
++
++    if (static_cast<uint32_t>(mutable_coinbase.version) !=
++        requirements.version) {
++        return "bad-cb-version";
++    }
++
++    if (mutable_coinbase.vin[0].nSequence != requirements.sequence) {
++        return "bad-cb-sequence";
++    }
++
++    if (mutable_coinbase.nLockTime != requirements.lock_time) {
++        return "bad-cb-locktime";
++    }
++
++    const CScript& script_sig{
++        mutable_coinbase.vin[0].scriptSig};
++
++    if (script_sig.size() < 2 || script_sig.size() > 100) {
++        return "bad-cb-length";
++    }
++
++    if (script_sig.size() <
++            requirements.script_sig_prefix.size() ||
++        !std::equal(
++            requirements.script_sig_prefix.begin(),
++            requirements.script_sig_prefix.end(),
++            script_sig.begin())) {
++        return "bad-cb-prefix";
++    }
++
++    const auto& witness_stack{
++        mutable_coinbase.vin[0].scriptWitness.stack};
++
++    if (requirements.witness) {
++        if (witness_stack.size() != 1 ||
++            witness_stack[0].size() !=
++                requirements.witness->size() ||
++            !std::equal(
++                witness_stack[0].begin(),
++                witness_stack[0].end(),
++                requirements.witness->begin())) {
++            return "bad-cb-witness";
++        }
++    } else if (!mutable_coinbase.vin[0].scriptWitness.IsNull()) {
++        return "unexpected-cb-witness";
++    }
++
++    const size_t required_count{
++        requirements.required_outputs.size()};
++
++    if (mutable_coinbase.vout.size() <= required_count) {
++        return "bad-cb-outputs";
++    }
++
++    const size_t first_required{
++        mutable_coinbase.vout.size() - required_count};
++
++    for (size_t i{0}; i < required_count; ++i) {
++        const CTxOut& actual{
++            mutable_coinbase.vout[first_required + i]};
++        const CTxOut& required{
++            requirements.required_outputs[i]};
++
++        if (actual.nValue != required.nValue ||
++            actual.scriptPubKey != required.scriptPubKey) {
++            return "bad-cb-required-output";
++        }
++    }
++
++    CAmount client_output_value{0};
++
++    for (size_t i{0}; i < first_required; ++i) {
++        const CAmount value{
++            mutable_coinbase.vout[i].nValue};
++
++        if (value < 0 ||
++            value > MAX_MONEY ||
++            client_output_value > MAX_MONEY - value) {
++            return "bad-cb-amount";
++        }
++
++        client_output_value += value;
++    }
++
++    if (client_output_value >
++        requirements.block_reward_remaining) {
++        return "bad-cb-amount";
++    }
++
++    const CTransactionRef coinbase{
++        MakeTransactionRef(std::move(mutable_coinbase))};
++
++    auto blockptr{
++        std::make_shared<CBlock>(*retained)};
++    CBlock& block{*blockptr};
++
++    node::AddMerkleRootAndCoinbase(
++        block,
++        coinbase,
++        version,
++        ntime,
++        nonce);
++
++    ChainstateManager& chainman{
++        EnsureAnyChainman(request.context)};
++
++    {
++        LOCK(cs_main);
++
++        const CBlockIndex* active{
++            chainman.ActiveChain().Tip()};
++
++        if (!active ||
++            active->GetBlockHash() != block.hashPrevBlock) {
++            return "stale-prevblk";
++        }
++
++        const CBlockIndex* pindex{
++            chainman.m_blockman.LookupBlockIndex(
++                block.hashPrevBlock)};
++
++        if (!pindex) {
++            return "inconclusive";
++        }
++
++        chainman.UpdateUncommittedBlockStructures(
++            block,
++            pindex);
++    }
++
++    bool new_block{false};
++
++    auto sc{
++        std::make_shared<submitblock_StateCatcher>(
++            block.GetHash())};
++
++    CHECK_NONFATAL(chainman.m_options.signals)
++        ->RegisterSharedValidationInterface(sc);
++
++    const bool accepted{
++        chainman.ProcessNewBlock(
++            blockptr,
++            /*force_processing=*/true,
++            /*min_pow_checked=*/true,
++            /*new_block=*/&new_block)};
++
++    CHECK_NONFATAL(chainman.m_options.signals)
++        ->UnregisterSharedValidationInterface(sc);
++
++    if (!new_block && accepted) {
++        return "duplicate";
++    }
++
++    if (!sc->found) {
++        return "inconclusive";
++    }
++
++    return BIP22ValidationResult(sc->state);
++},
++    };
++}
++
++
+ static RPCHelpMan submitblock()
+ {
+     // We allow 2 arguments for compliance with BIP22. Argument 2 is ignored.
+@@ -1525,6 +1783,7 @@ void RegisterMiningRPCCommands(CRPCTable& t)
+         {"mining", &getblocktemplate},
+         {"mining", &rzo_getminingjob},
+         {"hidden", &rzo_getminingblockinfo},
++        {"mining", &rzo_submitminingsolution},
+         {"mining", &submitblock},
+         {"mining", &submitheader},
+ 
+-- 
+2.47.3
+

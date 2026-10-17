@@ -1,0 +1,91 @@
+From bfcca11d6feb5df002f94a90dc2e830ebf989ea6 Mon Sep 17 00:00:00 2001
+From: Ingo Lipinski <ingo@rechenzauberonline.local>
+Date: Wed, 14 Oct 2026 08:17:02 +0000
+Subject: [PATCH 3/7] RZO FastTemplate: log prepared-template wait latency
+
+---
+ src/node/interfaces.cpp | 54 ++++++++++++++++++++++++++++++++++-------
+ 1 file changed, 45 insertions(+), 9 deletions(-)
+
+diff --git a/src/node/interfaces.cpp b/src/node/interfaces.cpp
+index 88ff50d..12385fd 100644
+--- a/src/node/interfaces.cpp
++++ b/src/node/interfaces.cpp
+@@ -1139,22 +1139,52 @@ public:
+         MillisecondsDouble timeout,
+         unsigned int& transactions_updated) override
+     {
++        const auto wait_start{std::chrono::steady_clock::now()};
++
+         std::unique_lock<std::mutex> lock{m_fasttemplate_cache_mutex};
+ 
+         // The first GBT starts the worker through createNewBlock(). Do not
+         // delay that initial request waiting for a worker that does not exist.
+-        if (!m_fasttemplate_started) return nullptr;
++        if (!m_fasttemplate_started) {
++            const int64_t wait_us{
++                std::chrono::duration_cast<std::chrono::microseconds>(
++                    std::chrono::steady_clock::now() - wait_start)
++                    .count()};
++
++            LogInfo(
++                "[RZO-FastTemplate] cache wait "
++                "tip=%s result=worker_not_started wait_us=%d\n",
++                tip.ToString(),
++                wait_us);
+ 
+-        m_fasttemplate_cache_cv.wait_for(
+-            lock,
+-            std::chrono::duration_cast<std::chrono::steady_clock::duration>(timeout),
+-            [this, &tip] {
+-                return m_fasttemplate_prepared &&
+-                       m_fasttemplate_prepared_tip == tip;
+-            });
++            return nullptr;
++        }
+ 
+-        if (!m_fasttemplate_prepared ||
++        const bool ready{
++            m_fasttemplate_cache_cv.wait_for(
++                lock,
++                std::chrono::duration_cast<std::chrono::steady_clock::duration>(
++                    timeout),
++                [this, &tip] {
++                    return m_fasttemplate_prepared &&
++                           m_fasttemplate_prepared_tip == tip;
++                })};
++
++        const int64_t wait_us{
++            std::chrono::duration_cast<std::chrono::microseconds>(
++                std::chrono::steady_clock::now() - wait_start)
++                .count()};
++
++        if (!ready ||
++            !m_fasttemplate_prepared ||
+             m_fasttemplate_prepared_tip != tip) {
++            LogInfo(
++                "[RZO-FastTemplate] cache wait "
++                "tip=%s result=%s wait_us=%d\n",
++                tip.ToString(),
++                ready ? "miss" : "timeout",
++                wait_us);
++
+             return nullptr;
+         }
+ 
+@@ -1172,6 +1202,12 @@ public:
+         assemble_options.include_dummy_extranonce = true;
+         ApplyArgsManOptions(*Assert(m_node.args), assemble_options);
+ 
++        LogInfo(
++            "[RZO-FastTemplate] cache wait "
++            "tip=%s result=hit wait_us=%d\n",
++            tip.ToString(),
++            wait_us);
++
+         LogInfo(
+             "[RZO-FastTemplate] cache hit tip=%s\n",
+             tip.ToString());
+-- 
+2.47.3
+

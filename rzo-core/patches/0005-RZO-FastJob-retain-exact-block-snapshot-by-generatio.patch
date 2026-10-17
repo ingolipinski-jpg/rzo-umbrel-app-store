@@ -1,0 +1,177 @@
+From 11887ea3d908f438761b2a6f61f4366c37211410 Mon Sep 17 00:00:00 2001
+From: Ingo Lipinski <ingo@rechenzauberonline.local>
+Date: Wed, 14 Oct 2026 23:11:31 +0000
+Subject: [PATCH 5/7] RZO FastJob: retain exact block snapshot by generation
+
+---
+ src/interfaces/mining.h | 10 +++++++
+ src/node/interfaces.cpp | 26 ++++++++++++++++-
+ src/rpc/mining.cpp      | 65 +++++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 100 insertions(+), 1 deletion(-)
+
+diff --git a/src/interfaces/mining.h b/src/interfaces/mining.h
+index 0077228..0d1aeeb 100644
+--- a/src/interfaces/mining.h
++++ b/src/interfaces/mining.h
+@@ -190,6 +190,16 @@ public:
+         const uint256& tip,
+         MillisecondsDouble timeout) = 0;
+ 
++    /**
++     * RZO retained exact block snapshot for a FastJob generation.
++     *
++     * Returns a copy of the exact prepared block body/header associated with
++     * `template_id`, or std::nullopt if that generation is no longer retained.
++     * This is read-only and does not submit or modify the block.
++     */
++    virtual std::optional<CBlock> getPreparedMiningBlock(
++        uint64_t template_id) = 0;
++
+     /**
+      * Interrupts createNewBlock and waitTipChanged.
+      */
+diff --git a/src/node/interfaces.cpp b/src/node/interfaces.cpp
+index 6eac997..233312c 100644
+--- a/src/node/interfaces.cpp
++++ b/src/node/interfaces.cpp
+@@ -1158,6 +1158,8 @@ public:
+                         std::chrono::steady_clock::now()};
+ 
+                     CBlock fastjob_merkle_block;
++                    static_cast<CBlockHeader&>(fastjob_merkle_block) =
++                        prepared_block_header;
+                     fastjob_merkle_block.vtx = prepared_block_transactions;
+ 
+                     interfaces::RZOFastMiningJob fastjob;
+@@ -1181,8 +1183,11 @@ public:
+                             m_fasttemplate_cache_mutex};
+ 
+                         // Allocate one unique process-local generation for
+-                        // this exact prepared mining template.
++                        // this exact prepared mining template. Publish the
++                        // compact job and exact block snapshot atomically under
++                        // the same mutex so their generation can never diverge.
+                         fastjob.template_id = ++m_fastjob_generation;
++                        m_fastjob_block_snapshot = fastjob_merkle_block;
+                         m_fastjob_prepared = std::move(fastjob);
+                     }
+ 
+@@ -1448,6 +1453,24 @@ public:
+         return job;
+     }
+ 
++    std::optional<CBlock> getPreparedMiningBlock(
++        uint64_t template_id) override
++    {
++        std::lock_guard<std::mutex> lock{m_fasttemplate_cache_mutex};
++
++        if (!m_fastjob_prepared ||
++            !m_fastjob_block_snapshot ||
++            m_fastjob_prepared->template_id != template_id ||
++            m_fastjob_block_snapshot->hashPrevBlock !=
++                m_fastjob_prepared->header.hashPrevBlock) {
++            return std::nullopt;
++        }
++
++        // Read-only copy. CTransactionRef keeps transaction data immutable and
++        // shared while the returned CBlock owns its own vector/header state.
++        return *m_fastjob_block_snapshot;
++    }
++
+     void interrupt() override
+     {
+         InterruptWait(notifications(), m_interrupt_mining);
+@@ -1491,6 +1514,7 @@ public:
+     // Retained until replaced by the next tip so RPC retries are harmless.
+     uint64_t m_fastjob_generation{0};
+     std::optional<interfaces::RZOFastMiningJob> m_fastjob_prepared;
++    std::optional<CBlock> m_fastjob_block_snapshot;
+ };
+ } // namespace
+ } // namespace node
+diff --git a/src/rpc/mining.cpp b/src/rpc/mining.cpp
+index b6d2475..897f6d5 100644
+--- a/src/rpc/mining.cpp
++++ b/src/rpc/mining.cpp
+@@ -1341,6 +1341,70 @@ static RPCHelpMan rzo_getminingjob()
+     };
+ }
+ 
++
++static RPCHelpMan rzo_getminingblockinfo()
++{
++    return RPCHelpMan{
++        "rzo_getminingblockinfo",
++        "RZO internal read-only FastJob retained-block diagnostic.\n",
++        {
++            {"template_id", RPCArg::Type::STR, RPCArg::Optional::NO,
++             "Process-local FastJob generation id"},
++        },
++        RPCResult{
++            RPCResult::Type::ANY,
++            "",
++            "Retained block snapshot metadata, or null if generation is not retained"},
++        RPCExamples{
++            HelpExampleCli("rzo_getminingblockinfo", "\"1\"")
++        },
++        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
++{
++    const std::string_view id_string{
++        self.Arg<std::string_view>("template_id")};
++    const std::string id_text{id_string};
++
++    uint64_t template_id{0};
++    try {
++        size_t consumed{0};
++        template_id = std::stoull(id_text, &consumed, 10);
++        if (consumed != id_text.size()) {
++            throw std::invalid_argument{"trailing characters"};
++        }
++    } catch (const std::exception&) {
++        throw JSONRPCError(
++            RPC_INVALID_PARAMETER,
++            "template_id must be an unsigned decimal integer");
++    }
++
++    NodeContext& node{EnsureAnyNodeContext(request.context)};
++    Mining& miner{EnsureMining(node)};
++
++    const auto block{miner.getPreparedMiningBlock(template_id)};
++    if (!block) {
++        return UniValue::VNULL;
++    }
++
++    UniValue result{UniValue::VOBJ};
++    result.pushKV("template_id", std::to_string(template_id));
++    result.pushKV("previousblockhash", block->hashPrevBlock.GetHex());
++    result.pushKV("version", block->nVersion);
++    result.pushKV("bits", strprintf("%08x", block->nBits));
++    result.pushKV("curtime", block->GetBlockTime());
++    result.pushKV(
++        "transactions",
++        static_cast<uint64_t>(block->vtx.size()));
++    result.pushKV(
++        "non_coinbase_transactions",
++        static_cast<uint64_t>(
++            block->vtx.empty() ? 0 : block->vtx.size() - 1));
++
++    return result;
++},
++    };
++}
++
++
+ class submitblock_StateCatcher final : public CValidationInterface
+ {
+ public:
+@@ -1460,6 +1524,7 @@ void RegisterMiningRPCCommands(CRPCTable& t)
+         {"mining", &getprioritisedtransactions},
+         {"mining", &getblocktemplate},
+         {"mining", &rzo_getminingjob},
++        {"hidden", &rzo_getminingblockinfo},
+         {"mining", &submitblock},
+         {"mining", &submitheader},
+ 
+-- 
+2.47.3
+

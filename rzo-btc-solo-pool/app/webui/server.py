@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import json
+import os
 import re
 import socket
 import threading
@@ -19,16 +20,16 @@ PORT = 2020
 BACKEND_BASE = "http://127.0.0.1:42070"
 WEB_ROOT = Path(__file__).resolve().parent
 NODE_PEER_SNAPSHOT = Path("/run/rzo-node-peers.json")
-BITCOIN_HOST = "10.21.21.8"
-BITCOIN_RPC_PORT = 8332
+BITCOIN_HOST = os.environ["BITCOIN_HOST"]
+BITCOIN_RPC_PORT = int(os.environ["BITCOIN_RPC_PORT"])
 STRATUM_HOST = "127.0.0.1"
 STRATUM_PORT = 42069
 ZMQ_ENDPOINTS = {
-    "rawblock": 28332,
-    "rawtx": 28333,
-    "hashblock": 28334,
-    "sequence": 28335,
-    "hashtx": 28336,
+    "rawblock": int(os.environ["ZMQ_RAWBLOCK_PORT"]),
+    "rawtx": int(os.environ["ZMQ_RAWTX_PORT"]),
+    "hashblock": int(os.environ["ZMQ_HASHBLOCK_PORT"]),
+    "sequence": int(os.environ["ZMQ_SEQUENCE_PORT"]),
+    "hashtx": int(os.environ["ZMQ_HASHTX_PORT"]),
 }
 NODE_CACHE_TTL = 8
 

@@ -1,0 +1,101 @@
+manifestVersion: 1.1
+id: rzo-core
+
+storage:
+  dataRoot: data
+
+category: bitcoin
+name: RZO Core
+version: "1.0.0"
+
+tagline: Bitcoin Core optimized for RZO solo mining
+
+description: >-
+  RZO Core is a customized Bitcoin Core v31.1 node for Umbrel,
+  optimized for low-latency solo mining and integration with the
+  RZO Bitcoin Solo Pool.
+
+
+  It includes the RZO FastTemplate and FastJob modifications,
+  optimized block-template handling, Stratum version-rolling support,
+  tuned ZMQ buffering, selected block-relay peers and mining-focused
+  RPC and performance defaults.
+
+
+  RZO Core remains a fully validating Bitcoin Core node and is designed
+  as a replacement for the standard Bitcoin app when used with the
+  RZO Bitcoin Solo Pool.
+
+developer: RechenZauberOnline
+website: "https://github.com/ingolipinski-jpg/rzo-umbrel-app-store"
+
+dependencies: []
+
+repo: "https://github.com/ingolipinski-jpg/rzo-umbrel-app-store"
+support: "https://github.com/ingolipinski-jpg/rzo-umbrel-app-store"
+
+port: 2100
+
+gallery: []
+path: ""
+defaultPassword: ""
+
+releaseNotes: >-
+  Initial RZO Core release based on Bitcoin Core v31.1.
+
+
+  Includes the RZO FastTemplate and FastJob patch series,
+  mining-oriented configuration defaults, reproducible build verification,
+  Tor and I2P support, and integration with the RZO Bitcoin Solo Pool.
+
+widgets:
+  - id: "stats"
+    type: "four-stats"
+    refresh: "5s"
+    endpoint: "app:3000/api/widget/stats"
+    link: ""
+    example:
+      type: "four-stats"
+      link: ""
+      items:
+        - title: "Connections"
+          text: "11"
+          subtext: "peers"
+        - title: "Mempool"
+          text: "257"
+          subtext: "MB"
+        - title: "Hashrate"
+          text: "590"
+          subtext: "EH/s"
+        - title: "Blockchain size"
+          text: "600"
+          subtext: "GB"
+  - id: "sync"
+    type: "text-with-progress"
+    refresh: "2s"
+    endpoint: "app:3000/api/widget/sync"
+    link: ""
+    example:
+      type: "text-with-progress"
+      link: ""
+      title: "Blockchain sync"
+      text: "83%"
+      progressLabel: "In progress"
+      progress: 0.83
+backupIgnore:
+  - data/bitcoin/blocks
+  - data/bitcoin/chainstate
+  - data/bitcoin/indexes
+  - data/bitcoin/testnet3/blocks
+  - data/bitcoin/testnet3/chainstate
+  - data/bitcoin/testnet3/indexes
+  - data/bitcoin/testnet4/blocks
+  - data/bitcoin/testnet4/chainstate
+  - data/bitcoin/testnet4/indexes
+  - data/bitcoin/signet/blocks
+  - data/bitcoin/signet/chainstate
+  - data/bitcoin/signet/indexes
+  - data/bitcoin/regtest/blocks
+  - data/bitcoin/regtest/chainstate
+  - data/bitcoin/regtest/indexes
+submitter: RechenZauberOnline

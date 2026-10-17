@@ -14,7 +14,7 @@ developer: RechenZauberOnline
 website: "https://github.com/ingolipinski-jpg/rzo-umbrel-app-store"
 
 dependencies:
-  - bitcoin
+  - rzo-core
 
 repo: "https://github.com/ingolipinski-jpg/rzo-umbrel-app-store"
 support: "https://github.com/ingolipinski-jpg/rzo-umbrel-app-store"

@@ -1,0 +1,23 @@
+{
+  "version": "v31.1",
+  "chain": "main",
+  "asmap": true,
+  "onlynet": [
+    "clearnet"
+  ],
+  "listen": [
+    "clearnet",
+    "tor",
+    "i2p"
+  ],
+  "peerblockfilters": false,
+  "blockfilterindex": false,
+  "maxconnections": 128,
+  "dbcache": 8192,
+  "prune": 0,
+  "txindex": true,
+  "datacarrier": true,
+  "datacarriersize": 100000,
+  "maxmempool": 2048,
+  "rpcworkqueue": 256
+}

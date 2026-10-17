@@ -1,0 +1,129 @@
+From 44e28b667591c0d5f37f8876d2b14a9e2743af03 Mon Sep 17 00:00:00 2001
+From: Ingo Lipinski <ingo@rechenzauberonline.local>
+Date: Wed, 14 Oct 2026 07:26:56 +0000
+Subject: [PATCH 2/7] RZO FastTemplate: preserve mempool snapshot semantics
+
+---
+ src/interfaces/mining.h |  3 ++-
+ src/node/interfaces.cpp | 15 ++++++++++++++-
+ src/rpc/mining.cpp      | 13 ++++++++++---
+ 3 files changed, 26 insertions(+), 5 deletions(-)
+
+diff --git a/src/interfaces/mining.h b/src/interfaces/mining.h
+index 99c6892..1dec239 100644
+--- a/src/interfaces/mining.h
++++ b/src/interfaces/mining.h
+@@ -140,7 +140,8 @@ public:
+      */
+     virtual std::unique_ptr<BlockTemplate> takePreparedTemplate(
+         const uint256& tip,
+-        MillisecondsDouble timeout) = 0;
++        MillisecondsDouble timeout,
++        unsigned int& transactions_updated) = 0;
+ 
+     /**
+      * Interrupts createNewBlock and waitTipChanged.
+diff --git a/src/node/interfaces.cpp b/src/node/interfaces.cpp
+index 2626310..88ff50d 100644
+--- a/src/node/interfaces.cpp
++++ b/src/node/interfaces.cpp
+@@ -999,6 +999,11 @@ public:
+                 assemble_options.include_dummy_extranonce = true;
+                 ApplyArgsManOptions(*Assert(m_node.args), assemble_options);
+ 
++                // Match Bitcoin Core GBT semantics: remember the mempool
++                // update counter from immediately before template assembly.
++                const unsigned int transactions_updated{
++                    Assert(m_node.mempool)->GetTransactionsUpdated()};
++
+                 const auto started{std::chrono::steady_clock::now()};
+ 
+                 std::unique_ptr<CBlockTemplate> prepared{
+@@ -1037,6 +1042,8 @@ public:
+                     {
+                         std::lock_guard<std::mutex> lock{m_fasttemplate_cache_mutex};
+                         m_fasttemplate_prepared_tip = expected_tip.hash;
++                        m_fasttemplate_prepared_transactions_updated =
++                            transactions_updated;
+                         m_fasttemplate_prepared = std::move(prepared);
+                         cached = true;
+                     }
+@@ -1129,7 +1136,8 @@ public:
+ 
+     std::unique_ptr<BlockTemplate> takePreparedTemplate(
+         const uint256& tip,
+-        MillisecondsDouble timeout) override
++        MillisecondsDouble timeout,
++        unsigned int& transactions_updated) override
+     {
+         std::unique_lock<std::mutex> lock{m_fasttemplate_cache_mutex};
+ 
+@@ -1152,7 +1160,11 @@ public:
+ 
+         std::unique_ptr<CBlockTemplate> prepared{
+             std::move(m_fasttemplate_prepared)};
++        transactions_updated =
++            m_fasttemplate_prepared_transactions_updated;
++
+         m_fasttemplate_prepared_tip = uint256::ZERO;
++        m_fasttemplate_prepared_transactions_updated = 0;
+ 
+         lock.unlock();
+ 
+@@ -1204,6 +1216,7 @@ public:
+     std::condition_variable m_fasttemplate_cache_cv;
+     bool m_fasttemplate_started{false};
+     uint256 m_fasttemplate_prepared_tip{uint256::ZERO};
++    unsigned int m_fasttemplate_prepared_transactions_updated{0};
+     std::unique_ptr<CBlockTemplate> m_fasttemplate_prepared;
+ };
+ } // namespace
+diff --git a/src/rpc/mining.cpp b/src/rpc/mining.cpp
+index 76ad6bb..9ec71ce 100644
+--- a/src/rpc/mining.cpp
++++ b/src/rpc/mining.cpp
+@@ -890,6 +890,7 @@ static RPCHelpMan getblocktemplate()
+     if (tip_changed || mempool_refresh)
+     {
+         std::unique_ptr<BlockTemplate> prepared_template;
++        unsigned int prepared_transactions_updated{0};
+ 
+         // RZO FastTemplate:
+         // Only a real tip transition waits for the proactive template.
+@@ -900,7 +901,8 @@ static RPCHelpMan getblocktemplate()
+                 REVERSE_LOCK(cs_main_lock, cs_main);
+                 prepared_template = miner.takePreparedTemplate(
+                     tip,
+-                    MillisecondsDouble{10});
++                    MillisecondsDouble{10},
++                    prepared_transactions_updated);
+             }
+ 
+             // cs_main is locked again here. Never consume a prepared template
+@@ -917,16 +919,21 @@ static RPCHelpMan getblocktemplate()
+         // Clear only after all unlocked waiting is complete.
+         pindexPrev = nullptr;
+ 
+-        nTransactionsUpdatedLast = mempool.GetTransactionsUpdated();
+         time_start = GetTime();
+ 
+         CBlockIndex* pindexPrevNew =
+             chainman.m_blockman.LookupBlockIndex(tip);
+ 
+         if (prepared_template) {
++            // Preserve the mempool state from immediately before the worker
++            // assembled this template. This keeps the normal >5 s mempool
++            // refresh semantics accurate if transactions arrived meanwhile.
++            nTransactionsUpdatedLast = prepared_transactions_updated;
+             block_template = std::move(prepared_template);
+         } else {
+-            // Normal Bitcoin Core fallback.
++            // Normal Bitcoin Core fallback: snapshot the current mempool
++            // counter immediately before synchronous template creation.
++            nTransactionsUpdatedLast = mempool.GetTransactionsUpdated();
+             block_template = miner.createNewBlock(
+                 {.include_dummy_extranonce = true},
+                 /*cooldown=*/false);
+-- 
+2.47.3
+
