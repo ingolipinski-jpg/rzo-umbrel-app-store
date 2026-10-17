@@ -31,6 +31,220 @@ ZMQ_ENDPOINTS = {
     "hashtx": 28336,
 }
 NODE_CACHE_TTL = 8
+
+RZO_HASHRATE_HISTORY_PATH = Path(
+    "/home/umbrel/rzo-webui-data/rzo-hashrate-history.json"
+)
+RZO_HASHRATE_HISTORY_INTERVAL = 30
+RZO_HASHRATE_HISTORY_RETENTION = 7 * 24 * 60 * 60
+_RZO_HASHRATE_HISTORY_LOCK = threading.Lock()
+
+
+def _rzo_history_load() -> dict[str, Any]:
+    try:
+        data = json.loads(
+            RZO_HASHRATE_HISTORY_PATH.read_text(encoding="utf-8")
+        )
+        if not isinstance(data, dict):
+            raise ValueError("history root is not an object")
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        data = {
+            "version": 1,
+            "updated_at": 0,
+            "pool": [],
+            "users": {},
+        }
+
+    if not isinstance(data.get("pool"), list):
+        data["pool"] = []
+
+    if not isinstance(data.get("users"), dict):
+        data["users"] = {}
+
+    return data
+
+
+def _rzo_history_save(data: dict[str, Any]) -> None:
+    RZO_HASHRATE_HISTORY_PATH.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    temp = RZO_HASHRATE_HISTORY_PATH.with_suffix(".json.tmp")
+
+    temp.write_text(
+        json.dumps(
+            data,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ),
+        encoding="utf-8",
+    )
+
+    temp.replace(RZO_HASHRATE_HISTORY_PATH)
+
+
+def _rzo_history_prune(
+    points: list[Any],
+    cutoff: int,
+) -> list[dict[str, Any]]:
+    result = []
+
+    for point in points:
+        if not isinstance(point, dict):
+            continue
+
+        try:
+            timestamp = int(point.get("t") or 0)
+        except (TypeError, ValueError):
+            continue
+
+        if timestamp >= cutoff:
+            result.append(point)
+
+    return result
+
+
+def _rzo_hashrate_history_collect() -> None:
+    now = int(time.time())
+    cutoff = now - RZO_HASHRATE_HISTORY_RETENTION
+
+    status = backend_json("/api/pool/status")
+    users = backend_json("/api/pool/users")
+
+    if not isinstance(status, dict):
+        raise ValueError("invalid /api/pool/status response")
+
+    downstream = status.get("downstream")
+    if not isinstance(downstream, dict):
+        raise ValueError("missing downstream")
+
+    stats = downstream.get("stats")
+    if not isinstance(stats, dict):
+        raise ValueError("missing downstream stats")
+
+    pool_point = {
+        "t": now,
+        "hashrate_1m": stats.get("hashrate_1m"),
+        "hashrate_5m": stats.get("hashrate_5m"),
+        "hashrate_15m": stats.get("hashrate_15m"),
+        "hashrate_1hr": stats.get("hashrate_1hr"),
+        "hashrate_6hr": stats.get("hashrate_6hr"),
+        "hashrate_1d": stats.get("hashrate_1d"),
+        "hashrate_7d": stats.get("hashrate_7d"),
+    }
+
+    if not isinstance(users, list):
+        users = []
+
+    with _RZO_HASHRATE_HISTORY_LOCK:
+        data = _rzo_history_load()
+
+        pool = _rzo_history_prune(
+            data.get("pool", []),
+            cutoff,
+        )
+        pool.append(pool_point)
+        data["pool"] = pool
+
+        user_history = data.setdefault("users", {})
+
+        active_addresses = set()
+
+        for user in users:
+            if not isinstance(user, dict):
+                continue
+
+            address = str(user.get("address") or "").strip()
+            if not address:
+                continue
+
+            active_addresses.add(address)
+
+            points = _rzo_history_prune(
+                user_history.get(address, []),
+                cutoff,
+            )
+
+            points.append(
+                {
+                    "t": now,
+                    "hashrate": user.get("hashrate"),
+                    "worker_count": user.get("worker_count"),
+                    "session_count": user.get("session_count"),
+                }
+            )
+
+            user_history[address] = points
+
+        for address in list(user_history):
+            points = _rzo_history_prune(
+                user_history.get(address, []),
+                cutoff,
+            )
+
+            if points:
+                user_history[address] = points
+            else:
+                user_history.pop(address, None)
+
+        data["updated_at"] = now
+        _rzo_history_save(data)
+
+
+def _rzo_hashrate_history_worker() -> None:
+    while True:
+        started = time.monotonic()
+
+        try:
+            _rzo_hashrate_history_collect()
+        except Exception as error:
+            print(
+                f"RZO hashrate history collector: "
+                f"{type(error).__name__}: {error}",
+                flush=True,
+            )
+
+        elapsed = time.monotonic() - started
+        time.sleep(
+            max(
+                1.0,
+                RZO_HASHRATE_HISTORY_INTERVAL - elapsed,
+            )
+        )
+
+
+def _rzo_hashrate_history_payload(
+    address: str | None = None,
+) -> dict[str, Any]:
+    cutoff = int(time.time()) - RZO_HASHRATE_HISTORY_RETENTION
+
+    with _RZO_HASHRATE_HISTORY_LOCK:
+        data = _rzo_history_load()
+
+    payload = {
+        "version": data.get("version", 1),
+        "updated_at": data.get("updated_at", 0),
+        "interval_seconds": RZO_HASHRATE_HISTORY_INTERVAL,
+        "retention_seconds": RZO_HASHRATE_HISTORY_RETENTION,
+        "pool": _rzo_history_prune(
+            data.get("pool", []),
+            cutoff,
+        ),
+    }
+
+    if address:
+        users = data.get("users", {})
+        payload["address"] = address
+        payload["user"] = _rzo_history_prune(
+            users.get(address, [])
+            if isinstance(users, dict)
+            else [],
+            cutoff,
+        )
+
+    return payload
+
 _NODE_CACHE: dict[str, Any] = {"time": 0.0, "payload": None}
 _NODE_CACHE_LOCK = threading.Lock()
 
@@ -2095,6 +2309,30 @@ class RZOHandler(SimpleHTTPRequestHandler):
 
             return
 
+        if path == "/api/pool/hashrate-history":
+            address = (
+                query.get("address", [""])[0]
+                if isinstance(query, dict)
+                else ""
+            ).strip()
+
+            if address and not ADDRESS_PATTERN.fullmatch(address):
+                self.send_json(
+                    400,
+                    {
+                        "error": "invalid_bitcoin_address",
+                    },
+                )
+                return
+
+            self.send_json(
+                200,
+                _rzo_hashrate_history_payload(
+                    address or None
+                ),
+            )
+            return
+
         if path == "/api/pool/top-shares":
             try:
                 self.send_json(200, _rzo_pool_top_shares())
@@ -2166,6 +2404,233 @@ class RZOHandler(SimpleHTTPRequestHandler):
             return
 
 
+        # PublicPool-kompatible API für externe Statistik-Collector
+        if path.startswith("/api/client/"):
+            address = urllib.parse.unquote(path[len("/api/client/"):]).strip()
+
+            if (
+                not address
+                or len(address) > 100
+                or not ADDRESS_PATTERN.fullmatch(address)
+            ):
+                self.send_json(
+                    400,
+                    {
+                        "error": "invalid_address",
+                    },
+                )
+                return
+
+            try:
+                encoded_address = urllib.parse.quote(address, safe="")
+                detail = backend_json(
+                    f"/api/pool/user/{encoded_address}"
+                )
+
+                if not isinstance(detail, dict):
+                    raise ValueError("invalid user response")
+
+                raw_sessions = detail.get("sessions", [])
+
+                if not isinstance(raw_sessions, list):
+                    raw_sessions = []
+
+                device_agents = _rzo_load_device_agents()
+                workers = []
+
+                def iso_timestamp(value):
+                    try:
+                        value = float(value or 0)
+                    except (TypeError, ValueError):
+                        return None
+
+                    if value <= 0:
+                        return None
+
+                    import datetime
+
+                    return (
+                        datetime.datetime
+                        .fromtimestamp(
+                            value,
+                            tz=datetime.timezone.utc,
+                        )
+                        .isoformat()
+                        .replace("+00:00", "Z")
+                    )
+
+                for session in raw_sessions:
+                    if not isinstance(session, dict):
+                        continue
+
+                    worker_name = str(
+                        session.get("worker_name") or ""
+                    ).strip()
+
+                    if not worker_name:
+                        continue
+
+                    stats = session.get("stats")
+
+                    if not isinstance(stats, dict):
+                        stats = {}
+
+                    device_entry = device_agents.get(
+                        f"{address}|{worker_name}",
+                        {},
+                    )
+
+                    start_timestamp = (
+                        device_entry.get("session_started_at")
+                        or device_entry.get("last_seen")
+                        or detail.get("authorized_at")
+                    )
+
+                    workers.append(
+                        {
+                            "name": worker_name,
+                            "sessionId": str(
+                                session.get("id") or ""
+                            ),
+                            "hashRate": stats.get(
+                                "hashrate_5m",
+                                0,
+                            ),
+                            "bestDifficulty": stats.get(
+                                "best_share",
+                                0,
+                            ),
+                            "startTime": iso_timestamp(
+                                start_timestamp
+                            ),
+                            "lastSeen": iso_timestamp(
+                                stats.get("last_share")
+                            ),
+                        }
+                    )
+
+                self.send_json(
+                    200,
+                    {
+                        "workersCount": len(workers),
+                        "workers": workers,
+                    },
+                )
+
+            except urllib.error.HTTPError as error:
+                if error.code == 404:
+                    self.send_json(
+                        404,
+                        {
+                            "error": "address_not_found",
+                        },
+                    )
+                else:
+                    self.send_json(
+                        error.code,
+                        {
+                            "error": "backend_http_error",
+                        },
+                    )
+
+            except Exception as error:
+                self.send_json(
+                    502,
+                    {
+                        "error": "publicpool_client_unavailable",
+                        "message": str(error),
+                    },
+                )
+
+            return
+
+        if path == "/api/pool":
+            try:
+                status = _rzo_pool_status()
+                downstream = status.get("downstream", {})
+
+                if not isinstance(downstream, dict):
+                    downstream = {}
+
+                stats = downstream.get("stats", {})
+
+                if not isinstance(stats, dict):
+                    stats = {}
+
+                blocks = _rzo_pool_blocks()
+                block_list = blocks.get("blocks", [])
+
+                if not isinstance(block_list, list):
+                    block_list = []
+
+                self.send_json(
+                    200,
+                    {
+                        "totalHashRate": stats.get(
+                            "hashrate_5m",
+                            0,
+                        ),
+                        "totalMiners": downstream.get(
+                            "user_count",
+                            0,
+                        ),
+                        "workersCount": downstream.get(
+                            "session_count",
+                            0,
+                        ),
+                        "blocksFound": block_list,
+                    },
+                )
+
+            except Exception as error:
+                self.send_json(
+                    502,
+                    {
+                        "error": "publicpool_pool_unavailable",
+                        "message": str(error),
+                    },
+                )
+
+            return
+
+        if path == "/api/network":
+            try:
+                bitcoin = backend_json(
+                    "/api/bitcoin/status"
+                )
+
+                if not isinstance(bitcoin, dict):
+                    bitcoin = {}
+
+                self.send_json(
+                    200,
+                    {
+                        "blocks": bitcoin.get(
+                            "height",
+                            0,
+                        ),
+                        "difficulty": bitcoin.get(
+                            "network_difficulty",
+                            0,
+                        ),
+                        "networkhashps": bitcoin.get(
+                            "network_hashrate",
+                            0,
+                        ),
+                    },
+                )
+
+            except Exception as error:
+                self.send_json(
+                    502,
+                    {
+                        "error": "publicpool_network_unavailable",
+                        "message": str(error),
+                    },
+                )
+
+            return
+
         # Persönliche, serverseitig gefilterte Ansicht
         if path == "/api/my-miners":
             self.handle_my_miners(query)
@@ -2199,6 +2664,13 @@ class RZOHandler(SimpleHTTPRequestHandler):
 
 
 def main() -> None:
+    history_thread = threading.Thread(
+        target=_rzo_hashrate_history_worker,
+        name="rzo-hashrate-history",
+        daemon=True,
+    )
+    history_thread.start()
+
     server = ThreadingHTTPServer((HOST, PORT), RZOHandler)
 
     print()

@@ -73,6 +73,7 @@ let latestWorkers = [];
 let latestNetworkDifficulty = 0;
 let previousWorkerShares = new Map();
 let hashrateHistory = [];
+let lastServerHistoryFetch = 0;
 
 function toFiniteNumber(value, fallback = 0) {
   const number = Number(value);
@@ -657,55 +658,26 @@ function updateWorkerSummary(workers) {
     `${online} online · ${idle} idle · ${offline} offline`;
 }
 
-function historyStorageKey() {
-  return `rzo-hashrate-history:${activeAddress}`;
+function applyServerHashrateHistory(payload) {
+  const points = Array.isArray(payload?.user)
+    ? payload.user
+    : [];
+
+  hashrateHistory = points
+    .map((point) => Number(point?.hashrate))
+    .filter((value) => Number.isFinite(value) && value >= 0)
+    .slice(-HASHRATE_HISTORY_LIMIT);
+
+  lastServerHistoryFetch = Date.now();
+
+  drawMinerSparklineFromHistory();
 }
 
-function loadHashrateHistory() {
-  try {
-    const parsed = JSON.parse(
-      window.localStorage.getItem(historyStorageKey()) || "[]",
-    );
-
-    if (!Array.isArray(parsed)) {
-      return [];
-    }
-
-    return parsed
-      .map(Number)
-      .filter(Number.isFinite)
-      .slice(-HASHRATE_HISTORY_LIMIT);
-  } catch {
-    return [];
-  }
-}
-
-function saveHashrateHistory() {
-  try {
-    window.localStorage.setItem(
-      historyStorageKey(),
-      JSON.stringify(hashrateHistory),
-    );
-  } catch {
-    // LocalStorage ist optional.
-  }
-}
-
-function updateSparkline(value) {
-  const hashrate = Number(value);
-
-  if (!Number.isFinite(hashrate) || hashrate < 0) {
-    return;
-  }
-
-  hashrateHistory.push(hashrate);
-  hashrateHistory = hashrateHistory.slice(-HASHRATE_HISTORY_LIMIT);
-  saveHashrateHistory();
-
+function drawMinerSparklineFromHistory() {
   if (hashrateHistory.length < 2) {
     elements.userSparklineLine.setAttribute("points", "");
     elements.hashrateTrend.textContent =
-      "Verlauf wird aufgebaut";
+      "Serverseitiger Verlauf wird aufgebaut";
     return;
   }
 
@@ -736,13 +708,14 @@ function updateSparkline(value) {
 
   const first = hashrateHistory[0];
   const last = hashrateHistory.at(-1);
-  const trend = first > 0 ? (last - first) / first * 100 : 0;
+  const trend =
+    first > 0 ? (last - first) / first * 100 : 0;
 
   elements.hashrateTrend.textContent =
     `${trend >= 0 ? "▲" : "▼"} ${formatPercent(
       Math.abs(trend),
       2,
-    )} im lokalen Verlauf`;
+    )} im serverseitigen Verlauf`;
 
   elements.hashrateTrend.classList.toggle(
     "is-positive",
@@ -753,6 +726,20 @@ function updateSparkline(value) {
     "is-negative",
     trend < -0.1,
   );
+}
+
+function updateSparkline(value) {
+  const hashrate = Number(value);
+
+  if (!Number.isFinite(hashrate) || hashrate < 0) {
+    return;
+  }
+
+  hashrateHistory.push(hashrate);
+  hashrateHistory =
+    hashrateHistory.slice(-HASHRATE_HISTORY_LIMIT);
+
+  drawMinerSparklineFromHistory();
 }
 
 function updateBestDiffProgress(bestShare) {
@@ -952,19 +939,35 @@ async function loadAddress(address, showLoading = true) {
     setAddressMessage("Minerdaten werden geladen …");
     elements.addressButton.disabled = true;
     setConnectionState(false, "Verbindung wird hergestellt");
-
-    hashrateHistory = loadHashrateHistory();
+    hashrateHistory = [];
   }
 
   try {
-    const [data] = await Promise.all([
+    const shouldRefreshHistory =
+      showLoading ||
+      Date.now() - lastServerHistoryFetch >= 30000;
+
+    const historyRequest = shouldRefreshHistory
+      ? fetchJson(
+          `/api/pool/hashrate-history?address=${encodeURIComponent(
+            activeAddress,
+          )}`,
+        )
+      : Promise.resolve(null);
+
+    const [data, , history] = await Promise.all([
       fetchJson(
         `/api/my-miners?address=${encodeURIComponent(
           activeAddress,
         )}`,
       ),
       loadPublicStatus(),
+      historyRequest,
     ]);
+
+    if (history) {
+      applyServerHashrateHistory(history);
+    }
 
     setAddressMessage("");
     renderDashboard(data);
@@ -1006,6 +1009,7 @@ function openAddress() {
 
   previousWorkerShares = new Map();
   hashrateHistory = [];
+  lastServerHistoryFetch = 0;
 
   loadAddress(address, true);
   startRefresh();

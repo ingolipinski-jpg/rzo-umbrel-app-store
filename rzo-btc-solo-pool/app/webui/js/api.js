@@ -6,6 +6,7 @@ const MAX_HISTORY_POINTS = 60;
 
 const hashrateHistory = [];
 let lastSuccessfulUpdate = 0;
+let lastServerHistoryFetch = 0;
 
 async function fetchJson(path) {
     const response = await fetch(`${API_BASE}${path}`, {
@@ -201,6 +202,35 @@ function setPoolStatus(state, message) {
     text.textContent = message;
 }
 
+function applyServerHashrateHistory(payload) {
+    const rows = Array.isArray(payload?.pool)
+        ? payload.pool
+        : [];
+
+    const values = rows
+        .map((point) => Number(
+            point?.hashrate_1m ??
+            point?.hashrate_5m
+        ))
+        .filter((value) =>
+            Number.isFinite(value) && value >= 0
+        )
+        .slice(-MAX_HISTORY_POINTS);
+
+    if (values.length > 0) {
+        hashrateHistory.splice(
+            0,
+            hashrateHistory.length,
+            ...values
+        );
+
+        drawHashrateSparkline();
+        updateHashrateTrend();
+    }
+
+    lastServerHistoryFetch = Date.now();
+}
+
 function addHashrateHistory(value) {
     const number = Number(value);
 
@@ -329,7 +359,7 @@ function updateHashrateTrend() {
     );
 
     if (hashrateHistory.length < 2) {
-        element.textContent = "Verlauf wird aufgebaut";
+        element.textContent = "Serverseitiger Verlauf wird aufgebaut";
         element.classList.add("is-neutral");
         return;
     }
@@ -338,7 +368,7 @@ function updateHashrateTrend() {
     const previous = hashrateHistory[hashrateHistory.length - 2];
 
     if (previous <= 0) {
-        element.textContent = "Live-Verlauf";
+        element.textContent = "Serverseitiger Verlauf";
         element.classList.add("is-neutral");
         return;
     }
@@ -458,6 +488,21 @@ async function refreshDashboard() {
         );
         setValue("idle-detail", formatNumber((downstream.idle ?? downstream.idle_count)));
         setValue("last-block-hash", shortHash(pool.last_block_hash));
+
+        if (
+            lastServerHistoryFetch === 0 ||
+            Date.now() - lastServerHistoryFetch >= 30000
+        ) {
+            try {
+                const history = await fetchJson(
+                    "/pool/hashrate-history"
+                );
+
+                applyServerHashrateHistory(history);
+            } catch (_) {
+                // History-Fehler darf die Live-Anzeige nicht stoppen.
+            }
+        }
 
         addHashrateHistory(stats.hashrate_1m);
 

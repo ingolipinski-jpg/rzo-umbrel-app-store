@@ -6,7 +6,9 @@
   const STORE = `rzo-v2-${isMiner ? "miner" : "pool"}`;
   const MAX_POINTS = 2016;
   const state = JSON.parse(localStorage.getItem(STORE) || '{"history":[],"records":{},"events":[],"baseline":{}}');
-  state.history ||= []; state.records ||= {}; state.events ||= []; state.baseline ||= {};
+  state.history = [];
+  state.records ||= {}; state.events ||= []; state.baseline ||= {};
+  let serverHistoryLoaded = false;
   state.records.firstSeen ||= Date.now();
   state.records.maxWorkers ||= 0;
   state.records.maxSessions ||= 0;
@@ -29,7 +31,13 @@
     for (const [x,s] of units) if (n >= x) return `${fmt(n/x,2)} ${s}`;
     return `${fmt(n,0)} H/s`;
   };
-  const save = () => localStorage.setItem(STORE, JSON.stringify(state));
+  const save = () => {
+    const persistentState = {
+      ...state,
+      history: []
+    };
+    localStorage.setItem(STORE, JSON.stringify(persistentState));
+  };
   const escapeHtml = s => String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
 
   function copyText(text, button) {
@@ -82,7 +90,7 @@
         <div class="rzo-chart-head">
           <div>
             <strong>Hashrate-Verlauf</strong>
-            <small>Live-Verlauf auf diesem Gerät</small>
+            <small>Serverseitiger 24/7-Verlauf</small>
           </div>
           <div class="rzo-range">
             <button data-range="3600000">1 h</button>
@@ -298,11 +306,63 @@
   }
   function applyFavoritesFilter(){const only=$("rzo-favorites-only")?.classList.contains("is-active");const f=new Set(JSON.parse(localStorage.getItem("rzo-favorites")||"[]"));document.querySelectorAll("#worker-list > *").forEach(c=>{const n=c.querySelector("h3,strong")?.textContent?.trim()||"";c.classList.toggle("rzo-hidden-favorite",only&&!f.has(n));});}
 
+  function applyServerHashrateHistory(payload){
+    const rows=isMiner
+      ? (Array.isArray(payload?.user)?payload.user:[])
+      : (Array.isArray(payload?.pool)?payload.pool:[]);
+
+    const mapped=rows
+      .map(point=>{
+        const seconds=number(point?.t);
+        const hashrate=number(
+          isMiner
+            ? point?.hashrate
+            : (point?.hashrate_5m ?? point?.hashrate_1m)
+        );
+
+        if(!seconds || hashrate<=0) return null;
+
+        return {
+          t:seconds*1000,
+          h:hashrate
+        };
+      })
+      .filter(Boolean)
+      .sort((a,b)=>a.t-b.t);
+
+    if(!mapped.length) return false;
+
+    state.history=mapped;
+    serverHistoryLoaded=true;
+
+    const first=mapped[0];
+
+    if(first?.t){
+      state.records.firstSeen=first.t;
+    }
+
+    return true;
+  }
+
   function recordPoint(hashrate, accepted, best, blocks, difficulty, height){
     const now=Date.now(); const last=state.history.at(-1);
-    if(!last || now-last.t>25000) state.history.push({t:now,h:hashrate,a:accepted,b:best,d:difficulty});
-    if(state.history.length>MAX_POINTS*4) state.history=state.history.filter((_,i)=>i%2===0);
-    state.history=state.history.filter(p=>now-p.t<604800000);
+
+    if(!serverHistoryLoaded){
+      if(!last || now-last.t>25000){
+        state.history.push({
+          t:now,
+          h:hashrate
+        });
+      }
+
+      if(state.history.length>MAX_POINTS*4){
+        state.history=state.history.filter((_,i)=>i%2===0);
+      }
+
+      state.history=state.history.filter(
+        p=>now-p.t<604800000
+      );
+    }
     state.records.hash=Math.max(number(state.records.hash),hashrate);
     state.records.best=Math.max(number(state.records.best),best);
     localStorage.setItem("rzo-pool-best-diff", String(state.records.best));
@@ -470,7 +530,7 @@
 
   function localExpectedBlocks(){
     let expected=0;
-    for(let i=1;i<state.history.length;i++){const a=state.history[i-1],b=state.history[i],dt=Math.min((b.t-a.t)/1000,300),d=number(a.d||b.d);if(d>0&&dt>0)expected+=(number(a.h)*dt)/(d*Math.pow(2,32));}
+    for(let i=1;i<state.history.length;i++){const a=state.history[i-1],b=state.history[i],dt=Math.min((b.t-a.t)/1000,300),d=number(a.d||b.d||difficulty);if(d>0&&dt>0)expected+=(number(a.h)*dt)/(d*Math.pow(2,32));}
     return expected;
   }
 
@@ -752,7 +812,7 @@
       ? `${found} Block${found===1?"":"s"} bei ${fmt(expected,6)} statistisch erwartet`
       : expected>0
         ? `${fmt(expected,8)} statistisch erwartete Blöcke`
-        : "Die lokale Erfassung wird aufgebaut";
+        : "Die serverseitige Erfassung wird aufgebaut";
 
     if(expected>0){
       const factor=1/expected;
@@ -800,7 +860,7 @@
         <strong>${fmt(state.records.maxAccepted,0)}</strong>
       </div>
       <div class="rzo-record">
-        <span>Browserlokale Erfassungsdauer</span>
+        <span>Serverseitige Erfassungsdauer</span>
         <strong>${formatDuration(recordedFor)}</strong>
       </div>
       <div class="rzo-record">
@@ -850,7 +910,12 @@
         getJson("/api/pool/live-counts"),
         getJson("/api/pool/top-shares"),
         getJson("/api/pool/blocks"),
-        getJson("/api/pool/connected-miners")
+        getJson("/api/pool/connected-miners"),
+        getJson(
+          isMiner && activeAddressFromPage()
+            ? `/api/pool/hashrate-history?address=${encodeURIComponent(activeAddressFromPage())}`
+            : "/api/pool/hashrate-history"
+        )
       ]);
 
       const pool=results[0].status==="fulfilled"?results[0].value:{};
@@ -871,6 +936,15 @@
               rows:[],
               working:0
             };
+
+      const hashrateHistory=
+        results[8].status==="fulfilled"
+          ? results[8].value
+          : null;
+
+      if(hashrateHistory){
+        applyServerHashrateHistory(hashrateHistory);
+      }
 
       if(!isMiner){
         renderConnectedMiners(
@@ -1074,7 +1148,7 @@
 
   function activeAddressFromPage(){return $("address-display")?.textContent?.trim().startsWith("bc1")?$("address-display").textContent.trim():new URLSearchParams(location.search).get("address")||"";}
   function parseDisplayedDifficulty(){const s=$("network-difficulty")?.textContent||"";const m=s.replace(/\./g,"").replace(",",".").match(/[\d.]+/);let n=m?number(m[0]):0;if(/T/i.test(s))n*=1e12;if(/G/i.test(s))n*=1e9;return n;}
-  function exportCsv(){const rows=[["Zeit","Hashrate_Hs","Accepted","Best_Diff","Network_Diff"],...state.history.map(p=>[new Date(p.t).toISOString(),p.h,p.a,p.b,p.d])];const blob=new Blob([rows.map(r=>r.join(";")).join("\n")],{type:"text/csv;charset=utf-8"});const a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download=`rzo-history-${new Date().toISOString().slice(0,10)}.csv`;a.click();URL.revokeObjectURL(a.href);}
+  function exportCsv(){const rows=[["Zeit","Hashrate_Hs","Accepted","Best_Diff","Network_Diff"],...state.history.map(p=>[new Date(p.t).toISOString(),p.h,p.a??"",p.b??"",p.d??""])];const blob=new Blob([rows.map(r=>r.join(";")).join("\n")],{type:"text/csv;charset=utf-8"});const a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download=`rzo-history-${new Date().toISOString().slice(0,10)}.csv`;a.click();URL.revokeObjectURL(a.href);}
   function installPwa(){const link=document.createElement("link");link.rel="manifest";link.href="/manifest.webmanifest";document.head.appendChild(link);}
   function init(){if(localStorage.getItem("rzo-theme")==="light")document.documentElement.classList.add("rzo-light");installCopyFix();addShell();addMinerTools();installPwa();enhanceWorkers();poll();let timer;const redraw=()=>{clearTimeout(timer);timer=setTimeout(()=>drawChart(number(document.querySelector("[data-range].is-active")?.dataset.range,86400000)),80);};window.addEventListener("resize",redraw);const wrap=document.querySelector(".rzo-chart-canvas-wrap");if(wrap&&"ResizeObserver"in window)new ResizeObserver(redraw).observe(wrap);}
   document.readyState==="loading"?document.addEventListener("DOMContentLoaded",init):init();
