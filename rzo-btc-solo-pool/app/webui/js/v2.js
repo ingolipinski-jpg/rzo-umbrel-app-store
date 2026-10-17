@@ -528,7 +528,7 @@
     ctx.fill();
   }
 
-  function localExpectedBlocks(){
+  function localExpectedBlocks(difficulty){
     let expected=0;
     for(let i=1;i<state.history.length;i++){const a=state.history[i-1],b=state.history[i],dt=Math.min((b.t-a.t)/1000,300),d=number(a.d||b.d||difficulty);if(d>0&&dt>0)expected+=(number(a.h)*dt)/(d*Math.pow(2,32));}
     return expected;
@@ -796,7 +796,7 @@
       $("rzo-chance-week").textContent="–";
     }
 
-    const expected=localExpectedBlocks();
+    const expected=localExpectedBlocks(difficulty);
     const found=Math.max(
       0,
       number(state.records.blocks)-number(state.baseline.blocks)
