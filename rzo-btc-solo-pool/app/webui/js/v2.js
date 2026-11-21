@@ -67,6 +67,7 @@
         <div class="rzo-health-item"><i id="health-node"></i><span>Bitcoin Node</span><strong id="health-node-text">Prüfung …</strong></div>
         <div class="rzo-health-item"><i id="health-stratum"></i><span>Stratum</span><strong id="health-stratum-text">Prüfung …</strong></div>
         <div class="rzo-health-item"><i id="health-zmq"></i><span>ZMQ</span><strong id="health-zmq-text">nicht gemeldet</strong></div>
+        <div class="rzo-health-item"><i id="health-ipc"></i><span>Native IPC</span><strong id="health-ipc-text">nicht bestätigt</strong></div>
         <div class="rzo-health-item"><i id="health-api"></i><span>Web API</span><strong id="health-api-text">Prüfung …</strong></div>
       </div>
       <div class="rzo-section-heading"><div><span class="rzo-kicker">RZO WebUI v${V}</span><h2>Kontrollzentrum</h2></div>
@@ -1099,6 +1100,32 @@
           : zmqValue===false
             ? "Nicht erreichbar"
             : "nicht prüfbar"
+      );
+
+      const ipcInfo = node?.ipc;
+      const ipcState = ipcInfo?.state || "unknown";
+      const ipcHeight = ipcInfo?.last_blockheight;
+
+      const ipcLabels = {
+        confirmed: ipcHeight != null
+          ? `Bestätigt · Block ${ipcHeight}`
+          : "Bestätigt",
+        fallback: "RPC-Fallback aktiv",
+        error: "IPC-Fehler",
+        down: "Pool nicht aktiv",
+        unknown: "Nicht bestätigt"
+      };
+
+      setHealth(
+        "health-ipc",
+        ipcState === "confirmed"
+          ? "ok"
+          : ipcState === "fallback" ||
+            ipcState === "error" ||
+            ipcState === "down"
+              ? "bad"
+              : "unknown",
+        ipcLabels[ipcState] || ipcLabels.unknown
       );
 
       recordPoint(
