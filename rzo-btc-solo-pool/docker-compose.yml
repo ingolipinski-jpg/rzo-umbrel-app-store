@@ -1,104 +1,146 @@
-version: "3.7"
-
 services:
-
   app_proxy:
     environment:
-      APP_HOST: rpc-forwarder
+      APP_HOST: webui
       APP_PORT: 2020
-
+    container_name: rzo-btc-solo-pool_app_proxy_1
   rpc-forwarder:
     image: alpine/socat:1.8.0.0
     restart: always
-
     command:
-      - -dd
+      - '-dd'
       - TCP-LISTEN:8332,bind=127.0.0.1,reuseaddr,fork
       - TCP:${APP_BITCOIN_NODE_IP}:${APP_BITCOIN_RPC_PORT}
-
     ports:
-      - "42068:42068"
-      - "42069:42069"
-      - "42070:42070"
-
+      - '42068:42068'
+      - '42069:42069'
+      - '42070:42070'
     networks:
       - umbrel_main_network
-
+    container_name: rzo-btc-solo-pool_rpc-forwarder_1
   pool:
-    image: debian:13-slim
+    image: ghcr.io/ingolipinski-jpg/rzo-para-ipc-runtime:1.0.2
     restart: always
-    user: "0:0"
-
-    network_mode: "service:rpc-forwarder"
-
+    user: '0:0'
+    network_mode: service:rpc-forwarder
     volumes:
-      - ${APP_DATA_DIR}/app/para/para:/usr/local/bin/para:ro
+      - ${APP_DATA_DIR}/app/para/para-ipc:/usr/local/bin/para:ro
+      - ${APP_DATA_DIR}/app/native/librzo_mining_ipc.so:/native/librzo_mining_ipc.so:ro
+      - ${UMBREL_ROOT}/app-data/bitcoin/data/bitcoin:/ipc-node:ro
       - ${APP_DATA_DIR}/data/para:/data
-
     environment:
+      RZO_IPC_SOCKET: /ipc-node/node.sock
+      RZO_ENONCE_STATE_FILE: /data/enonce-counter.state
+      LD_LIBRARY_PATH: /native
       BTC_RPC_USER: ${APP_BITCOIN_RPC_USER}
       BTC_RPC_PASS: ${APP_BITCOIN_RPC_PASS}
       BTC_NODE_IP: ${APP_BITCOIN_NODE_IP}
       BTC_RPC_PORT: ${APP_BITCOIN_RPC_PORT}
       BTC_ZMQ_PORT: ${APP_BITCOIN_ZMQ_HASHBLOCK_PORT}
       RUST_LOG: para=debug,bitcoind_async_client=info
-
     entrypoint:
       - /bin/bash
-      - -lc
-      - |
+      - '-lc'
+      - >
         echo "Warte auf Bitcoin Node RPC..."
 
-        until (echo >/dev/tcp/$${BTC_NODE_IP}/$${BTC_RPC_PORT}) >/dev/null 2>&1; do
+
+        until (echo >/dev/tcp/$${BTC_NODE_IP}/$${BTC_RPC_PORT}) >/dev/null 2>&1;
+        do
           sleep 2
         done
 
+
         echo "Bitcoin RPC erreichbar - warte auf lokalen RPC-Forwarder..."
+
 
         until (echo >/dev/tcp/127.0.0.1/8332) >/dev/null 2>&1; do
           sleep 1
         done
 
+
         echo "RPC-Forwarder erreichbar - starte RZO BTC Solo Pool"
 
-        exec /usr/local/bin/para pool --address 0.0.0.0 --port 42069 --high-diff-port 42068 --http-port 42070 --chain mainnet --bitcoin-rpc-port 8332 --bitcoin-rpc-username "$${BTC_RPC_USER}" --bitcoin-rpc-password "$${BTC_RPC_PASS}" --start-diff 1000 --min-diff 512 --vardiff-period 3.33 --vardiff-window 300 --update-interval 20 --zmq-block-notifications "tcp://$${BTC_NODE_IP}:$${BTC_ZMQ_PORT}" --enonce1-size 4 --enonce2-size 8 --bitcoind-timeout 60 --data-dir /data --store-path /data/para.redb --events-file /data/events.json
 
+        echo "$$(cat /proc/sys/kernel/random/uuid)" > /data/ipc-run-id
+        exec >> /data/pool-runtime.log 2>&1
+        exec /usr/local/bin/para pool --address 0.0.0.0 --port 42069
+        --high-diff-port 42068 --http-port 42070 --chain mainnet
+        --bitcoin-rpc-port 8332 --bitcoin-rpc-username "$${BTC_RPC_USER}"
+        --bitcoin-rpc-password "$${BTC_RPC_PASS}" --start-diff 1000 --min-diff
+        512 --vardiff-period 3.33 --vardiff-window 300 --update-interval 20
+        --zmq-block-notifications "tcp://$${BTC_NODE_IP}:$${BTC_ZMQ_PORT}"
+        --enonce1-size 4 --enonce2-size 8 --bitcoind-timeout 60 --data-dir /data
+        --store-path /data/para.redb --events-file /data/events.json
     depends_on:
       - rpc-forwarder
+    container_name: rzo-btc-solo-pool_pool_1
+  ipc-log-collector:
+    image: python:3.13-slim
+    restart: unless-stopped
+    network_mode: none
+    user: '0:0'
+    volumes:
+      - ${APP_DATA_DIR}/app/ipc-watcher:/app:ro
+      - ${APP_DATA_DIR}/data/para:/para-data
+    environment:
+      RZO_POOL_LOG: /para-data/pool-runtime.log
+      RZO_IPC_LOG: /para-data/ipc-events.log
+      RZO_IPC_RUN_FILE: /para-data/ipc-run-id
+      PYTHONDONTWRITEBYTECODE: '1'
+    command:
+      - python3
+      - -B
+      - /app/ipc-log-collector.py
+
+  ipc-watcher:
+    image: python:3.13-slim
+    restart: unless-stopped
+    network_mode: none
+    user: '0:0'
+    volumes:
+      - ${APP_DATA_DIR}/app/ipc-watcher:/app:ro
+      - ${APP_DATA_DIR}/data/para:/para-data:ro
+      - ${APP_DATA_DIR}/data/webui:/webui-data
+    environment:
+      RZO_IPC_LOG: /para-data/ipc-events.log
+      RZO_IPC_RUN_FILE: /para-data/ipc-run-id
+      RZO_IPC_STATUS: /webui-data/ipc-status.json
+      PYTHONDONTWRITEBYTECODE: '1'
+    command:
+      - python3
+      - -B
+      - /app/ipc-watcher.py
 
   device-watcher:
     image: python:3.13-slim
     restart: always
-    user: "0:0"
-
-    network_mode: "service:rpc-forwarder"
-
+    user: '0:0'
+    network_mode: service:rpc-forwarder
     cap_add:
       - NET_RAW
-
     volumes:
       - ${APP_DATA_DIR}/app/device-watcher:/watcher:ro
       - ${APP_DATA_DIR}/data/webui:/home/umbrel/rzo-webui-data
-
     command:
       - python3
-      - -u
+      - '-u'
       - /watcher/watcher.py
-
     depends_on:
       - rpc-forwarder
       - pool
-
+    container_name: rzo-btc-solo-pool_device-watcher_1
   webui:
     image: python:3.13-slim
+    container_name: rzo-btc-solo-pool_webui_1
     restart: always
-    user: "0:0"
+    user: '1000:1000'
     working_dir: /app
-
-    network_mode: "service:rpc-forwarder"
-
     environment:
-      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONDONTWRITEBYTECODE: '1'
+      BACKEND_BASE: http://rpc-forwarder:42070
+      STRATUM_HOST: rpc-forwarder
+      STRATUM_PORT: '42069'
       BITCOIN_HOST: ${APP_BITCOIN_NODE_IP}
       BITCOIN_RPC_PORT: ${APP_BITCOIN_RPC_PORT}
       ZMQ_RAWBLOCK_PORT: ${APP_BITCOIN_ZMQ_RAWBLOCK_PORT}
@@ -106,59 +148,39 @@ services:
       ZMQ_HASHBLOCK_PORT: ${APP_BITCOIN_ZMQ_HASHBLOCK_PORT}
       ZMQ_SEQUENCE_PORT: ${APP_BITCOIN_ZMQ_SEQUENCE_PORT}
       ZMQ_HASHTX_PORT: ${APP_BITCOIN_ZMQ_HASHTX_PORT}
-
     volumes:
       - ${APP_DATA_DIR}/app/webui:/app:ro
       - ${APP_DATA_DIR}/data/webui:/home/umbrel/rzo-webui-data
       - ${APP_DATA_DIR}/data/para:/home/umbrel/para-data:ro
-
     command:
       - python3
-      - -u
-      - -c
-      - |
-        import os, runpy
-        data = "/home/umbrel/rzo-webui-data"
-        os.makedirs(data, exist_ok=True)
-        for root, dirs, files in os.walk(data):
-            os.chown(root, 1000, 1000)
-            for name in dirs:
-                os.chown(os.path.join(root, name), 1000, 1000)
-            for name in files:
-                os.chown(os.path.join(root, name), 1000, 1000)
-        os.setgroups([])
-        os.setgid(1000)
-        os.setuid(1000)
-        runpy.run_path("/app/server.py", run_name="__main__")
-
+      - '-u'
+      - /app/server.py
+    ports:
+      - '2020:2020'
+    networks:
+      - umbrel_main_network
     depends_on:
-      - rpc-forwarder
       - pool
-
   widget-server:
     image: python:3.13-slim
     restart: always
-    user: "1000:1000"
+    user: '1000:1000'
     working_dir: /widget
-
     environment:
-      PYTHONDONTWRITEBYTECODE: "1"
-      RZO_WEBUI_BASE: http://rpc-forwarder:2020
-
+      PYTHONDONTWRITEBYTECODE: '1'
+      RZO_WEBUI_BASE: http://webui:2020
     volumes:
       - ${APP_DATA_DIR}/widget:/widget:ro
-
     command:
       - python3
-      - -u
+      - '-u'
       - /widget/server.py
-
     networks:
       - umbrel_main_network
-
     depends_on:
       - webui
-
+    container_name: rzo-btc-solo-pool_widget-server_1
 networks:
   umbrel_main_network:
     external: true

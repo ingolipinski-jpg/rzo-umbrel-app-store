@@ -17,12 +17,12 @@ from typing import Any
 HOST = "0.0.0.0"
 PORT = 2020
 
-BACKEND_BASE = "http://127.0.0.1:42070"
+BACKEND_BASE = "http://rpc-forwarder:42070"
 WEB_ROOT = Path(__file__).resolve().parent
 NODE_PEER_SNAPSHOT = Path("/run/rzo-node-peers.json")
 BITCOIN_HOST = os.environ["BITCOIN_HOST"]
 BITCOIN_RPC_PORT = int(os.environ["BITCOIN_RPC_PORT"])
-STRATUM_HOST = "127.0.0.1"
+STRATUM_HOST = "rpc-forwarder"
 STRATUM_PORT = 42069
 ZMQ_ENDPOINTS = {
     "rawblock": int(os.environ["ZMQ_RAWBLOCK_PORT"]),
@@ -305,6 +305,55 @@ def tcp_probe(host: str, port: int, timeout: float = 0.7) -> dict[str, Any]:
         }
 
 
+def read_ipc_status() -> dict[str, Any]:
+    """Liest den IPC-Watcher-Status ohne Zugriff auf Docker."""
+    path = Path(
+        "/home/umbrel/rzo-webui-data/ipc-status.json"
+    )
+
+    unknown = {
+        "state": "unknown",
+        "detail": "IPC-Status nicht verfügbar",
+        "checked_at": None,
+        "last_success_at": None,
+        "last_blockheight": None,
+    }
+
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+
+        if not isinstance(data, dict):
+            return unknown
+
+        checked_at = int(data.get("checked_at") or 0)
+        age = int(time.time()) - checked_at
+
+        if age < -30 or age > 30:
+            return {
+                **unknown,
+                "detail": "IPC-Überwachung nicht aktuell",
+            }
+
+        state = data.get("state")
+
+        if state not in (
+            "confirmed", "fallback", "error",
+            "down", "unknown"
+        ):
+            state = "unknown"
+
+        return {
+            "state": state,
+            "detail": str(data.get("detail") or "")[:120],
+            "checked_at": checked_at,
+            "last_success_at": data.get("last_success_at"),
+            "last_blockheight": data.get("last_blockheight"),
+        }
+
+    except (OSError, ValueError, TypeError):
+        return unknown
+
+
 def node_diagnostics() -> dict[str, Any]:
     """Robuster Status der lokalen RZO-Node über Pool-API und TCP-Prüfungen."""
     now = time.monotonic()
@@ -318,6 +367,7 @@ def node_diagnostics() -> dict[str, Any]:
         "source": "rzo-node-api-and-tcp-probes",
         "checked_at": int(time.time()),
         "bitcoin": None,
+        "ipc": read_ipc_status(),
         "mempool": None,
         "peers": None,
         "stratum": None,

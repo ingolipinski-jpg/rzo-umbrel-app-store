@@ -4,7 +4,9 @@ id: rzo-btc-solo-pool
 category: bitcoin
 name: RZO Bitcoin Solo Pool
 icon: "https://raw.githubusercontent.com/ingolipinski-jpg/rzo-umbrel-app-store/main/rzo-btc-solo-pool/icon.png?v=2"
-version: "1.0.1"
+version: "1.0.2"
+dependencies:
+  - bitcoin
 tagline: RZO Bitcoin Solo Mining Pool
 description: >-
   RZO Bitcoin Solo Pool with Para backend,
@@ -13,8 +15,6 @@ description: >-
 developer: RechenZauberOnline
 website: "https://github.com/ingolipinski-jpg/rzo-umbrel-app-store"
 
-dependencies:
-  - rzo-core
 
 repo: "https://github.com/ingolipinski-jpg/rzo-umbrel-app-store"
 support: "https://github.com/ingolipinski-jpg/rzo-umbrel-app-store"
