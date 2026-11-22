@@ -26,9 +26,12 @@ services:
     volumes:
       - ${APP_DATA_DIR}/app/para/para-ipc:/usr/local/bin/para:ro
       - ${APP_DATA_DIR}/app/native/librzo_mining_ipc.so:/native/librzo_mining_ipc.so:ro
-      - ${UMBREL_ROOT}/app-data/bitcoin/data/bitcoin:/ipc-node:ro
+      # Both paths are optional: only the installed node supplies a socket.
+      - ${UMBREL_ROOT}/app-data/bitcoin/data/bitcoin:/ipc-core:ro
+      - ${UMBREL_ROOT}/app-data/bitcoin-knots/data/bitcoin:/ipc-knots:ro
       - ${APP_DATA_DIR}/data/para:/data
     environment:
+      # The launcher selects the active provider's IPC socket at runtime.
       RZO_IPC_SOCKET: /ipc-node/node.sock
       RZO_ENONCE_STATE_FILE: /data/enonce-counter.state
       LD_LIBRARY_PATH: /native
@@ -42,6 +45,19 @@ services:
       - /bin/bash
       - '-lc'
       - >
+        # Resolve the IPC socket without assuming that Bitcoin Core is installed.
+        # An absent socket is not fatal: the pool retains its RPC fallback.
+        if [ -S /ipc-core/node.sock ]; then
+          export RZO_IPC_SOCKET=/ipc-core/node.sock
+          echo "Bitcoin Core IPC socket detected"
+        elif [ -S /ipc-knots/node.sock ]; then
+          export RZO_IPC_SOCKET=/ipc-knots/node.sock
+          echo "Bitcoin Knots IPC socket detected"
+        else
+          export RZO_IPC_SOCKET=/ipc-node/node.sock
+          echo "No native IPC socket detected; RPC fallback will be used"
+        fi
+
         echo "Warte auf Bitcoin Node RPC..."
 
 
