@@ -45,7 +45,7 @@ services:
       - >
         # The provider-exported data directory and relative IPC path are
         # resolved by Umbrel; absence of a socket leaves RPC available.
-        if [ -S "${RZO_IPC_SOCKET}" ]; then
+        if [ -S "$${RZO_IPC_SOCKET}" ]; then
           echo "Native IPC socket available"
         else
           echo "Native IPC socket unavailable; RPC fallback required"
