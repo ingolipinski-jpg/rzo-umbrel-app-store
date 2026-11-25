@@ -60,7 +60,7 @@ services:
         echo "RPC-Forwarder erreichbar - starte RZO BTC Solo Pool"
 
 
-        echo "$(cat /proc/sys/kernel/random/uuid)" > /data/ipc-run-id
+        echo "$$(cat /proc/sys/kernel/random/uuid)" > /data/ipc-run-id
 
         exec >> /data/pool-runtime.log 2>&1
 
