@@ -1,9 +1,53 @@
 "use strict";
 
-(() => {
+(async () => {
   const V = "3.2.0";
   const isMiner = location.pathname.endsWith("miner.html");
-  const STORE = `rzo-v2-${isMiner ? "miner" : "pool"}`;
+
+  let installationId;
+
+  try {
+    const response = await fetch("/api/installation", {
+      cache: "no-store"
+    });
+
+    if (!response.ok) throw new Error("Installation API unavailable");
+
+    const payload = await response.json();
+    installationId = payload.installation_id;
+
+    if (
+      typeof installationId !== "string" ||
+      !/^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(installationId)
+    ) {
+      throw new Error("Invalid installation ID");
+    }
+  } catch (error) {
+    console.error("RZO installation identity:", error);
+
+    const showError = () => {
+      const alert = document.createElement("div");
+      alert.setAttribute("role", "alert");
+      alert.textContent =
+        "RZO: Installationskennung nicht verfügbar. " +
+        "Mining-Statistiken konnten nicht geladen werden.";
+      alert.style.cssText =
+        "padding:12px;border:2px solid #c55;margin:10px";
+      document.body.prepend(alert);
+    };
+
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", showError, {
+        once: true
+      });
+    } else {
+      showError();
+    }
+    return;
+  }
+
+  const STORE =
+    `rzo-v3-${installationId}-${isMiner ? "miner" : "pool"}`;
   const MAX_POINTS = 2016;
   const state = JSON.parse(localStorage.getItem(STORE) || '{"history":[],"records":{},"events":[],"baseline":{}}');
   state.history = [];
@@ -366,7 +410,7 @@
     }
     state.records.hash=Math.max(number(state.records.hash),hashrate);
     state.records.best=Math.max(number(state.records.best),best);
-    localStorage.setItem("rzo-pool-best-diff", String(state.records.best));
+    localStorage.setItem(`${STORE}-best-diff`, String(state.records.best));
     state.records.blocks=Math.max(number(state.records.blocks),blocks);
     state.records.maxAccepted=Math.max(number(state.records.maxAccepted),accepted);
     state.records.lastHeight=Math.max(number(state.records.lastHeight),number(height));
@@ -551,7 +595,7 @@
       .map(worker=>({
         worker: worker.name || worker.worker_name || "Miner",
         best_share: number(
-          worker.all_time_best_share ??
+          worker.session_best_share ??
           worker.best_share ??
           0
         ),

@@ -893,7 +893,7 @@ async function loadPublicStatus() {
 
     const historicPoolBest =
       toFiniteNumber(
-        localStorage.getItem("rzo-pool-best-diff")
+        null
       ) || 0;
 
     elements.poolBestDiff.textContent =

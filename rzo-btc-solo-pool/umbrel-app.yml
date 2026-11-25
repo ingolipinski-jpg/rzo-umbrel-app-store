@@ -4,7 +4,7 @@ id: rzo-btc-solo-pool
 category: bitcoin
 name: RZO Bitcoin Solo Pool
 icon: "https://raw.githubusercontent.com/ingolipinski-jpg/rzo-umbrel-app-store/main/rzo-btc-solo-pool/icon.png?v=2"
-version: "1.0.2"
+version: "1.0.3"
 dependencies:
   - bitcoin
 tagline: RZO Bitcoin Solo Mining Pool

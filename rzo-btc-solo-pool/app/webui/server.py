@@ -9,6 +9,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -32,6 +33,34 @@ ZMQ_ENDPOINTS = {
     "hashtx": int(os.environ["ZMQ_HASHTX_PORT"]),
 }
 NODE_CACHE_TTL = 8
+
+
+RZO_INSTALLATION_ID_PATH = Path(
+    "/home/umbrel/rzo-webui-data/rzo-installation-id"
+)
+RZO_INSTALLATION_ID_LOCK = threading.Lock()
+
+
+def _rzo_installation_id() -> str:
+    with RZO_INSTALLATION_ID_LOCK:
+        path = RZO_INSTALLATION_ID_PATH
+
+        if not path.exists():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                with path.open("x", encoding="utf-8") as handle:
+                    handle.write(str(uuid.uuid4()) + "\n")
+            except FileExistsError:
+                pass
+
+        value = path.read_text(encoding="utf-8").strip()
+        parsed = uuid.UUID(value)
+
+        if parsed.version != 4 or str(parsed) != value:
+            raise ValueError("Ungueltige Installationskennung")
+
+        return value
+
 
 RZO_HASHRATE_HISTORY_PATH = Path(
     "/home/umbrel/rzo-webui-data/rzo-hashrate-history.json"
@@ -631,9 +660,7 @@ _RZO_PUBLIC_CACHE_LOCK = threading.Lock()
 
 _RZO_ALLTIME_PATH = "/home/umbrel/rzo-webui-data/rzo-alltime-best.json"
 
-_RZO_LEGACY_EVENT_PATHS = (
-    "/home/umbrel/para-stat-backup-20260820-083030/events.json",
-)
+_RZO_LEGACY_EVENT_PATHS = ()
 
 _RZO_LIVE_EVENT_PATH = "/home/umbrel/para-data/events.json"
 
@@ -1295,18 +1322,9 @@ def _rzo_pool_status() -> dict[str, Any]:
         if not isinstance(container, dict):
             return
 
-        current = _rzo_alltime_number(
-            container.get("best_share")
-        )
-
-        container["best_share"] = max(
-            current,
-            all_time_best,
-        )
-
-        container["all_time_best_share"] = (
-            all_time_best
-        )
+        # Aktuelle Best Difficulty bleibt der echte Backend-Wert.
+        # Der historische Rekord wird separat geliefert.
+        container["all_time_best_share"] = all_time_best
 
         for key in (
             "downstream",
@@ -2309,6 +2327,19 @@ class RZOHandler(SimpleHTTPRequestHandler):
         query = urllib.parse.parse_qs(parsed.query)
 
         # Öffentliche, aggregierte Pooldaten
+        if path == "/api/installation":
+            try:
+                self.send_json(
+                    200,
+                    {"installation_id": _rzo_installation_id()},
+                )
+            except (OSError, ValueError):
+                self.send_json(
+                    503,
+                    {"error": "installation_id_unavailable"},
+                )
+            return
+
         if path == "/api/pool/live-counts":
             try:
                 users = backend_json("/api/pool/users")
