@@ -60,8 +60,10 @@ services:
         echo "RPC-Forwarder erreichbar - starte RZO BTC Solo Pool"
 
 
-        echo "$$(cat /proc/sys/kernel/random/uuid)" > /data/ipc-run-id
+        echo "$(cat /proc/sys/kernel/random/uuid)" > /data/ipc-run-id
+
         exec >> /data/pool-runtime.log 2>&1
+
         exec /usr/local/bin/para pool --address 0.0.0.0 --port 42069
         --high-diff-port 42068 --http-port 42070 --chain mainnet
         --bitcoin-rpc-port 8332 --bitcoin-rpc-username "$${BTC_RPC_USER}"
